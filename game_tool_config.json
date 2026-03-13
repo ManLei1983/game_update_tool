@@ -1,7 +1,7 @@
 {
   "server": {
     "base_url": "http://127.0.0.1:18080",
-    "agent_id": "VM-3-1",
+    "agent_id": "VM-3-2",
     "auth_token": "",
     "use_query_token": false,
     "timeout_seconds": 15
@@ -17,12 +17,14 @@
     "launch_file": "runtime/launch.json",
     "manifest_file": "runtime/manifest.json",
     "state_file": "cache/state.json",
-    "exe_path": "QianNian.exe"
+    "exe_path": "D:/MyProjects/VisualStudio_Projects/qiannian/Debug/QianNian3.9.1.exe"
   },
   "behavior": {
     "download_resources": true,
     "download_exe": false,
     "launch_after_sync": false,
-    "fail_on_missing_manifest": false
+    "fail_on_missing_manifest": false,
+    "launch_ready_seconds": 10,
+    "post_load_delay_seconds": 5
   }
 }

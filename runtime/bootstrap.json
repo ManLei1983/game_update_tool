@@ -1,16 +1,26 @@
 {
   "ok": true,
-  "server_time": "2026-03-12 20:35:14",
-  "agent_id": "VM-3-1",
-  "profile_version": "2026-03-12 20:25:22",
+  "server_time": "2026-03-13 22:39:18",
+  "agent_id": "VM-3-2",
+  "profile_version": "2026-03-12 20:30:31",
   "task": {
     "enabled": true,
-    "region": "97区",
+    "region": "103",
     "group_start": 22,
-    "group_end": 66,
+    "group_end": 33,
     "task_mode": "normal",
     "priority": 0,
     "notes": ""
+  },
+  "control": {
+    "desired_run_state": "run",
+    "schedule_daily_start": "",
+    "auto_restart_on_stale": true,
+    "restart_cooldown_seconds": 600,
+    "max_restart_per_day": 3,
+    "startup_grace_seconds": 300,
+    "desired_action": "",
+    "action_seq": 0
   },
   "config": {
     "version": "",
@@ -25,12 +35,12 @@
   "downloads": {
     "exe": {
       "version": "",
-      "url": "http://192.168.8.3",
+      "url": "",
       "sha256": ""
     },
     "resources_manifest": {
       "version": "",
-      "url": "http://127.0.0.1:18080/api/resources/manifest?agent_id=VM-3-1",
+      "url": "http://127.0.0.1:18080/api/resources/manifest?agent_id=VM-3-2",
       "count": 2
     }
   },
@@ -62,5 +72,5 @@
       "updated_at": "2026-03-12 20:25:43"
     }
   ],
-  "updated_at": "2026-03-12 20:29:48"
+  "updated_at": "2026-03-12 20:30:31"
 }
