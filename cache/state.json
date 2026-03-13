@@ -1,0 +1,19 @@
+{
+  "resources": {
+    "hello.txt": {
+      "version": "2026-03-12 20:25:43",
+      "target_path": "D:\\MyProjects\\Python_Projects\\my_tools\\game_update_tool\\runtime\\hello.txt",
+      "updated_at": "2026-03-12 20:28:08"
+    },
+    "config.txt": {
+      "version": "2026-03-12 20:35:05",
+      "target_path": "D:\\MyProjects\\Python_Projects\\my_tools\\game_update_tool\\runtime\\config.txt",
+      "updated_at": "2026-03-12 20:35:14"
+    }
+  },
+  "agent_id": "VM-3-1",
+  "profile_version": "2026-03-12 20:25:22",
+  "config_version": "",
+  "manifest_version": "",
+  "last_sync_time": "2026-03-12 20:35:14"
+}
