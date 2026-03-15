@@ -19,7 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+if getattr(sys, "frozen", False):
+    SCRIPT_DIR = Path(sys.executable).resolve().parent
+else:
+    SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "game_tool_config.json"
 EXAMPLE_CONFIG_FILE = SCRIPT_DIR / "game_tool_config.example.json"
 IS_WINDOWS = os.name == "nt"
