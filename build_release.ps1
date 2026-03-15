@@ -22,6 +22,9 @@ if (Test-Path (Join-Path $buildRoot $releaseName)) { Remove-Item (Join-Path $bui
     "$root\game_tool.py"
 
 Copy-Item "$root\game_tool_config.example.json" "$releaseDir\game_tool_config.example.json" -Force
+Copy-Item "$root\game_tool_config.template.json" "$releaseDir\game_tool_config.template.json" -Force
+Copy-Item "$root\generate_vm_config.ps1" "$releaseDir\generate_vm_config.ps1" -Force
+Copy-Item "$root\DEPLOY_GUIDE.md" "$releaseDir\DEPLOY_GUIDE.md" -Force
 if ($IncludeConfig -and (Test-Path "$root\game_tool_config.json")) {
     Copy-Item "$root\game_tool_config.json" "$releaseDir\game_tool_config.json" -Force
 }

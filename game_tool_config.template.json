@@ -1,0 +1,51 @@
+{
+  "server": {
+    "base_url": "__BASE_URL__",
+    "agent_id": "__AGENT_ID__",
+    "auth_token": "__AUTH_TOKEN__",
+    "use_query_token": false,
+    "timeout_seconds": 15
+  },
+  "paths": {
+    "cache_dir": "cache",
+    "downloads_dir": "downloads",
+    "backups_dir": "backups",
+    "runtime_dir": "runtime",
+    "bootstrap_file": "runtime/bootstrap.json",
+    "payload_json_file": "runtime/task_payload.json",
+    "payload_text_file": "runtime/task_payload.txt",
+    "launch_file": "runtime/launch.json",
+    "manifest_file": "runtime/manifest.json",
+    "state_file": "cache/state.json",
+    "exe_path": "__EXE_PATH__"
+  },
+  "behavior": {
+    "download_resources": true,
+    "download_exe": false,
+    "launch_after_sync": false,
+    "fail_on_missing_manifest": false,
+    "control_poll_seconds": 5,
+    "control_error_retry_seconds": 5,
+    "launch_ready_seconds": 10,
+    "post_load_delay_seconds": 5
+  },
+  "qiannian": {
+    "ui_enabled": true,
+    "launch_button": "gongzi",
+    "control_ids": {
+      "region_combo": 1005,
+      "load_button": 1007,
+      "current_group_edit": 1008,
+      "max_group_edit": 1021,
+      "role_index_edit": 1016,
+      "start_button": 1002,
+      "runtask_button": 1013,
+      "gongzi_button": 1020,
+      "clear_open_games_button": 1019,
+      "trade_setting_checkbox": 1018,
+      "gumu_exit_checkbox": 1022,
+      "log_file_checkbox": 1015,
+      "log_detail_checkbox": 1017
+    }
+  }
+}
