@@ -275,3 +275,13 @@ python game_tool.py run
 4. 打开 `runtime/bootstrap.json` 看内容是不是你想要的
 
 只要这一步成功，后面再接资源下载和 EXE 启动就会轻松很多。
+
+
+
+**如果你后面还要继续加更多 qiannian 控件**
+现在扩展点已经比较清楚了，主要看这 4 处：
+
+- local_report checkbox 字段定义：[app.py#L463](app://-/index.html?hostId=local)
+- local_report 页面表单：[config_console.html#L94](app://-/index.html?hostId=local)
+- game_tool 控件 ID 映射：[game_tool.py#L74](app://-/index.html?hostId=local)
+- game_tool 执行映射：[game_tool.py#L88](app://-/index.html?hostId=local)

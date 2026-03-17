@@ -24,6 +24,8 @@
     "download_exe": false,
     "launch_after_sync": false,
     "fail_on_missing_manifest": false,
+    "control_poll_seconds": 5,
+    "control_error_retry_seconds": 5,
     "launch_ready_seconds": 10,
     "post_load_delay_seconds": 5
   }

@@ -1,0 +1,12 @@
+{
+  "qiannian_ui": {
+    "launch_button": "none",
+    "selorder": 2,
+    "checkboxes": {
+      "trade_setting": false,
+      "gumu_exit": true,
+      "log_file": true,
+      "log_detail": false
+    }
+  }
+}

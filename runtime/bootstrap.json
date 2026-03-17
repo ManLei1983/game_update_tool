@@ -1,13 +1,13 @@
 {
   "ok": true,
-  "server_time": "2026-03-13 22:39:18",
+  "server_time": "2026-03-14 13:21:18",
   "agent_id": "VM-3-2",
   "profile_version": "2026-03-12 20:30:31",
   "task": {
     "enabled": true,
     "region": "103",
-    "group_start": 22,
-    "group_end": 33,
+    "group_start": 10,
+    "group_end": 35,
     "task_mode": "normal",
     "priority": 0,
     "notes": ""
@@ -24,11 +24,22 @@
   },
   "config": {
     "version": "",
-    "payload_text": "",
-    "payload_json": null
+    "payload_text": "{\n  \"qiannian_ui\": {\n    \"launch_button\": \"none\",\n    \"selorder\": 2,\n    \"checkboxes\": {\n      \"trade_setting\": false,\n      \"gumu_exit\": true,\n      \"log_file\": true,\n      \"log_detail\": false\n    }\n  }\n}",
+    "payload_json": {
+      "qiannian_ui": {
+        "launch_button": "none",
+        "selorder": 2,
+        "checkboxes": {
+          "trade_setting": false,
+          "gumu_exit": true,
+          "log_file": true,
+          "log_detail": false
+        }
+      }
+    }
   },
   "launch": {
-    "startup_exe": "QianNian.exe",
+    "startup_exe": "QianNian3.9.1.exe",
     "startup_args": "",
     "script_entry": ""
   },
@@ -41,7 +52,7 @@
     "resources_manifest": {
       "version": "",
       "url": "http://127.0.0.1:18080/api/resources/manifest?agent_id=VM-3-2",
-      "count": 2
+      "count": 1
     }
   },
   "resources": [
@@ -57,20 +68,7 @@
       "target_agents": [],
       "notes": "",
       "updated_at": "2026-03-12 20:35:05"
-    },
-    {
-      "name": "hello.txt",
-      "enabled": true,
-      "kind": "config",
-      "version": "2026-03-12 20:25:43",
-      "target_path": "runtime/hello.txt",
-      "url": "http://127.0.0.1:9001/hello.txt",
-      "sha256": "",
-      "size_bytes": 0,
-      "target_agents": [],
-      "notes": "",
-      "updated_at": "2026-03-12 20:25:43"
     }
   ],
-  "updated_at": "2026-03-12 20:30:31"
+  "updated_at": "2026-03-14 13:20:58"
 }

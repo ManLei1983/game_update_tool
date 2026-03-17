@@ -1,5 +1,6 @@
-import argparse
+﻿import argparse
 import configparser
+import datetime as dt
 import csv
 import ctypes
 import hashlib
@@ -138,7 +139,6 @@ def normalize_action(value: Any) -> str:
     return ""
 
 
-
 def normalize_launch_button(value: Any, fallback: str = "gongzi") -> str:
     text = str(value or "").strip().lower()
     normalized_fallback = str(fallback or "gongzi").strip().lower() or "gongzi"
@@ -147,6 +147,7 @@ def normalize_launch_button(value: Any, fallback: str = "gongzi") -> str:
     if text in VALID_LAUNCH_BUTTONS:
         return text
     return normalized_fallback
+
 
 def parse_hhmm(value: Any) -> Optional[Tuple[int, int]]:
     text = str(value or "").strip()
@@ -203,6 +204,7 @@ def backup_file(path: Path, backups_dir: Path) -> Optional[Path]:
     shutil.copy2(path, backup_path)
     return backup_path
 
+
 class Win32DialogController:
     BM_GETCHECK = 0x00F0
     BM_CLICK = 0x00F5
@@ -241,7 +243,9 @@ class Win32DialogController:
 
     def _find_main_window_once(self, pid: int) -> int:
         result: List[int] = []
-        enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        enum_proc_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
 
         @enum_proc_type
         def enum_proc(hwnd: int, _lparam: int) -> bool:
@@ -262,7 +266,7 @@ class Win32DialogController:
     def get_control(self, parent_hwnd: int, control_id: int) -> int:
         child_hwnd = self.user32.GetDlgItem(parent_hwnd, control_id)
         if not child_hwnd:
-            raise RuntimeError(f"找不到控件 ID={control_id}")
+            raise RuntimeError(f"找不到控件，ID={control_id}")
         return child_hwnd
 
     def set_edit_text(self, parent_hwnd: int, control_id: int, text: str) -> None:
@@ -337,7 +341,9 @@ class Win32DialogController:
         state = int(self.user32.SendMessageW(child_hwnd, self.BM_GETCHECK, 0, 0))
         return state == self.BST_CHECKED
 
-    def set_checkbox_state(self, parent_hwnd: int, control_id: int, checked: bool) -> None:
+    def set_checkbox_state(
+        self, parent_hwnd: int, control_id: int, checked: bool
+    ) -> None:
         desired = bool(checked)
         current = self.get_checkbox_state(parent_hwnd, control_id)
         if current != desired:
@@ -378,7 +384,9 @@ class Win32DialogController:
         result: List[int] = []
         expected_class = str(class_name or "").strip()
         excluded = int(exclude_hwnd or 0)
-        enum_proc_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        enum_proc_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
 
         @enum_proc_type
         def enum_proc(hwnd: int, _lparam: int) -> bool:
@@ -398,7 +406,9 @@ class Win32DialogController:
         self.user32.EnumWindows(enum_proc, 0)
         return result[0] if result else 0
 
-    def confirm_message_box(self, pid: int, owner_hwnd: int = 0, timeout_seconds: int = 5) -> bool:
+    def confirm_message_box(
+        self, pid: int, owner_hwnd: int = 0, timeout_seconds: int = 5
+    ) -> bool:
         dialog_hwnd = self.find_top_window(
             pid,
             timeout_seconds,
@@ -409,6 +419,7 @@ class Win32DialogController:
             return False
         self.click_button(dialog_hwnd, self.IDOK)
         return True
+
 
 class GameTool:
     def __init__(self, config: Dict[str, Any]) -> None:
@@ -438,13 +449,27 @@ class GameTool:
         self.state_file = self.resolve_path(self.paths["state_file"])
         self.exe_path = self.resolve_path(self.paths["exe_path"])
 
-        self.control_poll_seconds = max(5, parse_int(self.behavior.get("control_poll_seconds"), 15))
-        self.control_error_retry_seconds = max(5, parse_int(self.behavior.get("control_error_retry_seconds"), 30))
-        self.process_stop_timeout_seconds = max(5, parse_int(self.behavior.get("process_stop_timeout_seconds"), 20))
-        self.window_find_timeout_seconds = max(5, parse_int(self.behavior.get("window_find_timeout_seconds"), 60))
-        self.launch_ready_seconds = max(0, parse_int(self.behavior.get("launch_ready_seconds"), 20))
-        self.post_load_delay_seconds = max(0, parse_int(self.behavior.get("post_load_delay_seconds"), 2))
-        self.launch_settle_seconds = max(1, parse_int(self.behavior.get("launch_settle_seconds"), 8))
+        self.control_poll_seconds = max(
+            5, parse_int(self.behavior.get("control_poll_seconds"), 15)
+        )
+        self.control_error_retry_seconds = max(
+            5, parse_int(self.behavior.get("control_error_retry_seconds"), 30)
+        )
+        self.process_stop_timeout_seconds = max(
+            5, parse_int(self.behavior.get("process_stop_timeout_seconds"), 20)
+        )
+        self.window_find_timeout_seconds = max(
+            5, parse_int(self.behavior.get("window_find_timeout_seconds"), 60)
+        )
+        self.launch_ready_seconds = max(
+            0, parse_int(self.behavior.get("launch_ready_seconds"), 20)
+        )
+        self.post_load_delay_seconds = max(
+            0, parse_int(self.behavior.get("post_load_delay_seconds"), 2)
+        )
+        self.launch_settle_seconds = max(
+            1, parse_int(self.behavior.get("launch_settle_seconds"), 8)
+        )
         self.post_clear_game_delay_seconds = max(
             0,
             parse_int(self.behavior.get("post_clear_game_delay_seconds"), 5),
@@ -455,9 +480,12 @@ class GameTool:
         )
 
         self.ui_enabled = bool(self.qiannian.get("ui_enabled", True))
-        self.default_launch_button = normalize_launch_button(self.qiannian.get("launch_button", "gongzi"), "gongzi")
+        self.default_launch_button = normalize_launch_button(
+            self.qiannian.get("launch_button", "gongzi"), "gongzi"
+        )
         self.dialog_controller = Win32DialogController() if self.ui_enabled else None
         self.agent_started_epoch = int(time.time())
+        self.schedule_runtime_initialized = False
 
     def resolve_path(self, raw_path: str) -> Path:
         path = Path(raw_path)
@@ -466,7 +494,12 @@ class GameTool:
         return SCRIPT_DIR / path
 
     def ensure_dirs(self) -> None:
-        for directory in [self.cache_dir, self.downloads_dir, self.backups_dir, self.runtime_dir]:
+        for directory in [
+            self.cache_dir,
+            self.downloads_dir,
+            self.backups_dir,
+            self.runtime_dir,
+        ]:
             directory.mkdir(parents=True, exist_ok=True)
 
     def load_state(self) -> Dict[str, Any]:
@@ -498,7 +531,52 @@ class GameTool:
             state["agent_runtime"] = runtime
         return runtime
 
-    def build_url(self, path_or_url: str, params: Optional[Dict[str, Any]] = None) -> str:
+    def normalize_runtime_for_today(self, state: Dict[str, Any]) -> bool:
+        runtime = self.get_runtime_state(state)
+        session_date = str(runtime.get("session_date", "")).strip()
+        if not session_date or session_date == today_str():
+            return False
+        if self.is_process_running():
+            return False
+
+        changed = False
+        if runtime.get("session_active", False):
+            runtime["session_active"] = False
+            changed = True
+        if session_date:
+            runtime["session_date"] = ""
+            changed = True
+        if parse_int(runtime.get("last_pid"), 0) != 0:
+            runtime["last_pid"] = 0
+            changed = True
+        if str(runtime.get("status", "")).strip().lower() in {"running", "completed"}:
+            runtime["status"] = "idle"
+            changed = True
+
+        reset_fields = {
+            "last_seen_report_time": "",
+            "last_seen_report_elapsed": None,
+            "last_seen_group": 0,
+            "last_seen_role_index": 0,
+            "last_remote_stale": False,
+            "last_remote_has_report": False,
+            "last_remote_completed": False,
+            "last_seen_stale": False,
+        }
+        for key, expected in reset_fields.items():
+            if runtime.get(key) != expected:
+                runtime[key] = expected
+                changed = True
+
+        if changed:
+            print_line(
+                f"[STATE] cleared previous-day runtime without active process: session_date={session_date} -> {today_str()}"
+            )
+        return changed
+
+    def build_url(
+        self, path_or_url: str, params: Optional[Dict[str, Any]] = None
+    ) -> str:
         if path_or_url.startswith(("http://", "https://")):
             base = path_or_url
         else:
@@ -528,7 +606,9 @@ class GameTool:
             request.add_header("X-Auth-Token", self.auth_token)
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")
@@ -545,7 +625,6 @@ class GameTool:
             raise RuntimeError("返回 JSON 不是对象")
         return data
 
-
     def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         url = self.build_url(path)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -555,7 +634,9 @@ class GameTool:
             request.add_header("X-Auth-Token", self.auth_token)
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
                 body_text = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")
@@ -574,12 +655,16 @@ class GameTool:
     def fetch_bootstrap(self) -> Dict[str, Any]:
         if not self.agent_id:
             raise RuntimeError("配置里的 server.agent_id 不能为空")
-        return self.request_json(self.build_url("/api/bootstrap", {"agent_id": self.agent_id}))
+        return self.request_json(
+            self.build_url("/api/bootstrap", {"agent_id": self.agent_id})
+        )
 
     def fetch_control(self) -> Dict[str, Any]:
         if not self.agent_id:
             raise RuntimeError("配置里的 server.agent_id 不能为空")
-        return self.request_json(self.build_url("/api/agent/control", {"agent_id": self.agent_id}))
+        return self.request_json(
+            self.build_url("/api/agent/control", {"agent_id": self.agent_id})
+        )
 
     def notify_recovering(
         self,
@@ -588,8 +673,13 @@ class GameTool:
         control: Dict[str, Any],
     ) -> None:
         hold_seconds = max(
-            parse_int(control.get("startup_grace_seconds"), self.startup_grace_seconds_fallback),
-            self.launch_ready_seconds + self.launch_settle_seconds + self.post_clear_game_delay_seconds,
+            parse_int(
+                control.get("startup_grace_seconds"),
+                self.startup_grace_seconds_fallback,
+            ),
+            self.launch_ready_seconds
+            + self.launch_settle_seconds
+            + self.post_clear_game_delay_seconds,
         )
         payload = {
             "agent_id": self.agent_id,
@@ -612,7 +702,9 @@ class GameTool:
         manifest_info = bootstrap.get("downloads", {}).get("resources_manifest", {})
         manifest_url = str(manifest_info.get("url", "")).strip()
         if not manifest_url:
-            manifest_url = self.build_url("/api/resources/manifest", {"agent_id": self.agent_id})
+            manifest_url = self.build_url(
+                "/api/resources/manifest", {"agent_id": self.agent_id}
+            )
         return self.request_json(manifest_url)
 
     def do_bootstrap(self) -> Dict[str, Any]:
@@ -629,6 +721,8 @@ class GameTool:
     def do_status(self) -> None:
         self.ensure_dirs()
         state = self.normalize_state_for_agent(self.load_state())
+        if self.normalize_runtime_for_today(state):
+            self.save_state(state)
         runtime = self.get_runtime_state(state)
         self.ensure_restart_counter(runtime)
         self.save_state(state)
@@ -643,6 +737,9 @@ class GameTool:
         print_line(f"Launch Reason: {runtime.get('last_launch_reason', '-')}")
         print_line(f"Last Stop: {runtime.get('last_stop_time', '-')}")
         print_line(f"Stop Reason: {runtime.get('last_stop_reason', '-')}")
+        print_line(
+            f"Next Schedule Date: {runtime.get('next_schedule_date', '-') or '-'}"
+        )
         print_line(
             f"Restart Count: {parse_int(runtime.get('restart_count_today'), 0)} / {runtime.get('restart_count_date', '-') or '-'}"
         )
@@ -661,27 +758,53 @@ class GameTool:
 
         try:
             control_doc = self.fetch_control()
-            control = control_doc.get("control", {}) if isinstance(control_doc.get("control", {}), dict) else {}
-            remote_runtime = control_doc.get("runtime", {}) if isinstance(control_doc.get("runtime", {}), dict) else {}
+            control = (
+                control_doc.get("control", {})
+                if isinstance(control_doc.get("control", {}), dict)
+                else {}
+            )
+            remote_runtime = (
+                control_doc.get("runtime", {})
+                if isinstance(control_doc.get("runtime", {}), dict)
+                else {}
+            )
             print_line(
                 f"Remote Control: run_state={control.get('desired_run_state', '-')} auto_restart={bool(control.get('auto_restart_on_stale', False))} schedule={control.get('schedule_daily_start', '-') or '-'}"
             )
             print_line(
                 f"Remote Report: has_report={bool(remote_runtime.get('has_report', False))} stale={bool(remote_runtime.get('stale', False))} completed={bool(remote_runtime.get('completed', False))} elapsed={remote_runtime.get('elapsed', '-') if remote_runtime.get('elapsed') is not None else '-'}"
             )
-            pending_reason = self.get_pending_restart_reason(runtime, remote_runtime, control)
+            pending_reason = self.get_pending_restart_reason(
+                runtime, remote_runtime, control
+            )
             if pending_reason:
-                block_reason = self.get_auto_restart_block_reason(runtime, control)
-                if block_reason:
-                    print_line(f"Auto Restart: triggered={pending_reason} blocked={block_reason}")
+                if self.should_defer_auto_restart_until_schedule(runtime, control):
+                    print_line(
+                        f"Auto Restart: triggered={pending_reason} deferred_until_schedule next_date={runtime.get('next_schedule_date', '-') or '-'} schedule={control.get('schedule_daily_start', '-') or '-'}"
+                    )
                 else:
-                    print_line(f"Auto Restart: triggered={pending_reason} allowed=true")
-            elif bool(control.get("auto_restart_on_stale", False)) and runtime.get("session_active", False):
+                    block_reason = self.get_auto_restart_block_reason(runtime, control)
+                    if block_reason:
+                        print_line(
+                            f"Auto Restart: triggered={pending_reason} blocked={block_reason}"
+                        )
+                    else:
+                        print_line(
+                            f"Auto Restart: triggered={pending_reason} allowed=true"
+                        )
+            elif bool(control.get("auto_restart_on_stale", False)) and runtime.get(
+                "session_active", False
+            ):
                 last_launch_epoch = parse_int(runtime.get("last_launch_epoch"), 0)
-                if last_launch_epoch > 0 and not remote_runtime.get("has_report", False):
+                if last_launch_epoch > 0 and not remote_runtime.get(
+                    "has_report", False
+                ):
                     startup_grace_seconds = max(
                         30,
-                        parse_int(control.get("startup_grace_seconds"), self.startup_grace_seconds_fallback),
+                        parse_int(
+                            control.get("startup_grace_seconds"),
+                            self.startup_grace_seconds_fallback,
+                        ),
                     )
                     elapsed = max(0, int(time.time() - last_launch_epoch))
                     remaining = max(0, startup_grace_seconds - elapsed)
@@ -712,7 +835,9 @@ class GameTool:
         runtime["status"] = "stopped"
         self.save_state(state)
 
-    def write_bootstrap_outputs(self, bootstrap: Dict[str, Any], manifest: Optional[Dict[str, Any]]) -> None:
+    def write_bootstrap_outputs(
+        self, bootstrap: Dict[str, Any], manifest: Optional[Dict[str, Any]]
+    ) -> None:
         save_json_file(self.bootstrap_file, bootstrap)
         save_json_file(self.launch_file, bootstrap.get("launch", {}))
         if manifest is not None:
@@ -743,7 +868,9 @@ class GameTool:
             request.add_header("X-Auth-Token", self.auth_token)
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout_seconds
+            ) as response:
                 with temp_path.open("wb") as handle:
                     shutil.copyfileobj(response, handle)
         except Exception as exc:
@@ -763,7 +890,9 @@ class GameTool:
                 f"SHA256 校验失败: {file_path.name} expected={expected_sha256} actual={actual_sha256}"
             )
 
-    def sync_resource_items(self, manifest: Dict[str, Any], state: Dict[str, Any]) -> None:
+    def sync_resource_items(
+        self, manifest: Dict[str, Any], state: Dict[str, Any]
+    ) -> None:
         if not self.behavior.get("download_resources", True):
             print_line("[SYNC] 已跳过资源下载 (behavior.download_resources=false)")
             return
@@ -837,7 +966,9 @@ class GameTool:
             if temp_file.suffix.lower() != ".exe":
                 staged_path = self.downloads_dir / temp_file.name.replace(".tmp", "")
                 shutil.move(str(temp_file), str(staged_path))
-                print_line(f"[SYNC] 已下载 EXE 更新包，但当前仅自动替换 .exe 文件: {staged_path}")
+                print_line(
+                    f"[SYNC] 已下载 EXE 到临时文件，等待后续替换 .exe: {staged_path}"
+                )
                 return
 
             self.exe_path.parent.mkdir(parents=True, exist_ok=True)
@@ -868,7 +999,9 @@ class GameTool:
         print_line(f"每日启动: {control.get('schedule_daily_start', '-') or '-'}")
         print_line(f"配置版本: {bootstrap.get('profile_version', '-')}")
         print_line(f"脚本配置版本: {config_info.get('version', '-')}")
-        print_line(f"资源清单版本: {downloads.get('resources_manifest', {}).get('version', '-')}")
+        print_line(
+            f"资源清单版本: {downloads.get('resources_manifest', {}).get('version', '-')}"
+        )
         print_line(f"启动 EXE: {launch.get('startup_exe', '-')}")
         print_line("=" * 56)
 
@@ -893,7 +1026,11 @@ class GameTool:
         state["agent_id"] = bootstrap.get("agent_id", self.agent_id)
         state["profile_version"] = bootstrap.get("profile_version", "")
         state["config_version"] = bootstrap.get("config", {}).get("version", "")
-        state["manifest_version"] = bootstrap.get("downloads", {}).get("resources_manifest", {}).get("version", "")
+        state["manifest_version"] = (
+            bootstrap.get("downloads", {})
+            .get("resources_manifest", {})
+            .get("version", "")
+        )
         state["last_sync_time"] = now_str()
         self.save_state(state)
 
@@ -913,10 +1050,14 @@ class GameTool:
     def load_cached_bootstrap(self) -> Dict[str, Any]:
         bootstrap = load_json_file(self.bootstrap_file, default={}) or {}
         if not isinstance(bootstrap, dict) or not bootstrap:
-            raise RuntimeError("本地 bootstrap.json 不存在或无效，无法执行 warm restart")
+            raise RuntimeError(
+                "未找到 bootstrap.json 中的 launch 配置，无法 warm restart"
+            )
         return bootstrap
 
-    def build_launch_command(self) -> Tuple[Path, str, List[str]]:
+    def build_launch_command(
+        self, emit_fallback_log: bool = True
+    ) -> Tuple[Path, str, List[str]]:
         launch_info = load_json_file(self.launch_file, default={}) or {}
         startup_exe = str(launch_info.get("startup_exe", "")).strip()
         startup_args = str(launch_info.get("startup_args", "")).strip()
@@ -927,9 +1068,10 @@ class GameTool:
             if requested_path.exists():
                 exe_path = requested_path
             elif self.exe_path.exists():
-                print_line(
-                    f"[LAUNCH] startup_exe 不存在，回退到 paths.exe_path: {requested_path} -> {self.exe_path}"
-                )
+                if emit_fallback_log:
+                    print_line(
+                        f"[LAUNCH] startup_exe 不存在，回退到 paths.exe_path: {requested_path} -> {self.exe_path}"
+                    )
             else:
                 exe_path = requested_path
         if not exe_path.exists():
@@ -951,14 +1093,16 @@ class GameTool:
         except OSError as exc:
             if getattr(exc, "winerror", None) == 740:
                 raise RuntimeError(
-                    "QianNian.exe 需要管理员权限。请用“管理员身份”启动当前终端，再运行 python game_tool.py run。"
+                    "QianNian.exe 需要管理员权限。请用管理员身份启动当前终端，然后再运行 game_tool。"
                 ) from exc
             raise
         return process.pid
 
     def resolve_image_name(self) -> str:
         try:
-            _exe_path, image_name, _command = self.build_launch_command()
+            _exe_path, image_name, _command = self.build_launch_command(
+                emit_fallback_log=False
+            )
             return image_name
         except Exception:
             return self.exe_path.name
@@ -973,7 +1117,9 @@ class GameTool:
             errors="ignore",
         )
         if result.returncode not in (0, 1):
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "tasklist 失败")
+            raise RuntimeError(
+                result.stderr.strip() or result.stdout.strip() or "tasklist 失败"
+            )
 
         pids: List[int] = []
         reader = csv.reader(io.StringIO(result.stdout))
@@ -1011,7 +1157,9 @@ class GameTool:
             time.sleep(1)
         raise RuntimeError(f"关闭进程超时: {target}")
 
-    def stop_qiannian(self, state: Optional[Dict[str, Any]], reason: str, clear_session: bool) -> None:
+    def stop_qiannian(
+        self, state: Optional[Dict[str, Any]], reason: str, clear_session: bool
+    ) -> None:
         stopped = self.terminate_processes()
         if state is not None:
             runtime = self.get_runtime_state(state)
@@ -1050,7 +1198,9 @@ class GameTool:
         return default
 
     def get_status_ini_path(self) -> Path:
-        exe_path, _image_name, _command = self.build_launch_command()
+        exe_path, _image_name, _command = self.build_launch_command(
+            emit_fallback_log=False
+        )
         return exe_path.parent / "account" / "status.ini"
 
     def read_status_ini_group(self) -> int:
@@ -1070,9 +1220,13 @@ class GameTool:
 
         if not parser.has_section("WorkStatus"):
             if last_error is not None:
-                print_line(f"[RESUME] failed to read status.ini: {ini_path} -> {last_error}")
+                print_line(
+                    f"[RESUME] failed to read status.ini: {ini_path} -> {last_error}"
+                )
             return 0
-        return parse_int(parser.get("WorkStatus", "CurrentProcessGroupID", fallback="0"), 0)
+        return parse_int(
+            parser.get("WorkStatus", "CurrentProcessGroupID", fallback="0"), 0
+        )
 
     def build_ui_plan(
         self,
@@ -1080,24 +1234,52 @@ class GameTool:
         resume_group: int = 0,
         skip_load_button: bool = False,
     ) -> Dict[str, Any]:
-        task = bootstrap.get("task", {}) if isinstance(bootstrap.get("task", {}), dict) else {}
-        control = bootstrap.get("control", {}) if isinstance(bootstrap.get("control", {}), dict) else {}
+        task = (
+            bootstrap.get("task", {})
+            if isinstance(bootstrap.get("task", {}), dict)
+            else {}
+        )
+        control = (
+            bootstrap.get("control", {})
+            if isinstance(bootstrap.get("control", {}), dict)
+            else {}
+        )
         overrides = self.extract_ui_overrides(bootstrap)
-        region = self.pick_first_value([task.get("region"), overrides.get("region")], "")
+        region = self.pick_first_value(
+            [task.get("region"), overrides.get("region")], ""
+        )
         group_start = self.pick_positive_int(
-            [task.get("group_start"), overrides.get("group_start"), overrides.get("start_group"), overrides.get("current_group"), overrides.get("group_id")],
+            [
+                task.get("group_start"),
+                overrides.get("group_start"),
+                overrides.get("start_group"),
+                overrides.get("current_group"),
+                overrides.get("group_id"),
+            ],
             0,
         )
         group_end = self.pick_positive_int(
-            [task.get("group_end"), overrides.get("group_end"), overrides.get("max_group"), overrides.get("max_group_id")],
+            [
+                task.get("group_end"),
+                overrides.get("group_end"),
+                overrides.get("max_group"),
+                overrides.get("max_group_id"),
+            ],
             0,
         )
         role_index = self.pick_first_value(
-            [overrides.get("role_index"), overrides.get("selorder"), overrides.get("start_role_index")],
+            [
+                overrides.get("role_index"),
+                overrides.get("selorder"),
+                overrides.get("start_role_index"),
+            ],
             0,
         )
         launch_button = normalize_launch_button(
-            self.pick_first_value([overrides.get("launch_button"), self.default_launch_button], self.default_launch_button),
+            self.pick_first_value(
+                [overrides.get("launch_button"), self.default_launch_button],
+                self.default_launch_button,
+            ),
             self.default_launch_button,
         )
         checkbox_source = overrides.get("checkboxes")
@@ -1117,8 +1299,29 @@ class GameTool:
             "launch_button": launch_button,
             "checkboxes": checkbox_plan,
             "skip_load_button": bool(skip_load_button),
-            "desired_run_state": str(control.get("desired_run_state", "run")).strip().lower() or "run",
+            "desired_run_state": str(control.get("desired_run_state", "run"))
+            .strip()
+            .lower()
+            or "run",
         }
+
+    def clear_open_games_with_confirm(
+        self, pid: int, hwnd: int, control_id: int
+    ) -> None:
+        print_line(f"[UI] restart mode: clearing open games (control_id={control_id})")
+        self.dialog_controller.click_button(hwnd, control_id)
+        if not self.dialog_controller.confirm_message_box(
+            pid, owner_hwnd=hwnd, timeout_seconds=3
+        ):
+            self.dialog_controller.post_click_button(hwnd, control_id)
+            print_line(
+                f"[UI] retry posted clear_open_games_button (control_id={control_id})"
+            )
+            if not self.dialog_controller.confirm_message_box(
+                pid, owner_hwnd=hwnd, timeout_seconds=7
+            ):
+                raise RuntimeError("failed to confirm clear open games dialog")
+        print_line("[UI] confirmed clear open games dialog")
 
     def apply_bootstrap_to_window(
         self,
@@ -1138,45 +1341,64 @@ class GameTool:
             resume_group=resume_group,
             skip_load_button=skip_load_button,
         )
-        hwnd = self.dialog_controller.find_main_window(pid, self.window_find_timeout_seconds)
+        hwnd = self.dialog_controller.find_main_window(
+            pid, self.window_find_timeout_seconds
+        )
         region_combo_id = parse_int(self.control_ids.get("region_combo"), 1005)
         load_button_id = parse_int(self.control_ids.get("load_button"), 1007)
-        current_group_edit_id = parse_int(self.control_ids.get("current_group_edit"), 1008)
+        current_group_edit_id = parse_int(
+            self.control_ids.get("current_group_edit"), 1008
+        )
         max_group_edit_id = parse_int(self.control_ids.get("max_group_edit"), 1021)
         role_index_edit_id = parse_int(self.control_ids.get("role_index_edit"), 1016)
-        clear_open_games_button_id = parse_int(self.control_ids.get("clear_open_games_button"), 1019)
+        clear_open_games_button_id = parse_int(
+            self.control_ids.get("clear_open_games_button"), 1019
+        )
 
         if clear_open_games:
             if clear_open_games_button_id <= 0:
                 raise RuntimeError("clear_open_games_button id is not configured")
-            self.dialog_controller.post_click_button(hwnd, clear_open_games_button_id)
-            print_line(f"[UI] posted clear_open_games_button (control_id={clear_open_games_button_id})")
-            time.sleep(0.3)
-            if not self.dialog_controller.confirm_message_box(pid, owner_hwnd=hwnd, timeout_seconds=5):
-                raise RuntimeError("failed to confirm clear open games dialog")
-            print_line("[UI] confirmed clear open games dialog")
+            self.clear_open_games_with_confirm(pid, hwnd, clear_open_games_button_id)
             if self.post_clear_game_delay_seconds > 0:
-                print_line(f"[UI] wait after clear open games: {self.post_clear_game_delay_seconds}s")
+                print_line(
+                    f"[UI] wait after clear open games: {self.post_clear_game_delay_seconds}s"
+                )
                 time.sleep(self.post_clear_game_delay_seconds)
 
         if plan["region"]:
-            self.dialog_controller.select_combo_text(hwnd, region_combo_id, plan["region"])
+            self.dialog_controller.select_combo_text(
+                hwnd, region_combo_id, plan["region"]
+            )
         if plan["group_start"] > 0:
-            self.dialog_controller.set_edit_text(hwnd, current_group_edit_id, str(plan["group_start"]))
-            print_line(f"[UI] group_start edit <- {plan['group_start']} (control_id={current_group_edit_id})")
+            self.dialog_controller.set_edit_text(
+                hwnd, current_group_edit_id, str(plan["group_start"])
+            )
+            print_line(
+                f"[UI] group_start edit <- {plan['group_start']} (control_id={current_group_edit_id})"
+            )
             if not plan["skip_load_button"]:
-                self.dialog_controller.set_edit_text(hwnd, role_index_edit_id, str(plan["role_index"]))
-                print_line(f"[UI] role_index edit <- {plan['role_index']} (control_id={role_index_edit_id})")
+                self.dialog_controller.set_edit_text(
+                    hwnd, role_index_edit_id, str(plan["role_index"])
+                )
+                print_line(
+                    f"[UI] role_index edit <- {plan['role_index']} (control_id={role_index_edit_id})"
+                )
                 self.dialog_controller.click_button(hwnd, load_button_id)
                 print_line(f"[UI] clicked load_button (control_id={load_button_id})")
                 if self.post_load_delay_seconds > 0:
                     print_line(f"[UI] wait after load: {self.post_load_delay_seconds}s")
                     time.sleep(self.post_load_delay_seconds)
             else:
-                print_line("[UI] recovery mode: skip load_button and keep the group restored by qiannian startup")
+                print_line(
+                    "[UI] recovery mode: skip load_button and keep the group restored by qiannian startup"
+                )
         if plan["group_end"] > 0:
-            self.dialog_controller.set_edit_text(hwnd, max_group_edit_id, str(plan["group_end"]))
-            print_line(f"[UI] group_end edit <- {plan['group_end']} (control_id={max_group_edit_id})")
+            self.dialog_controller.set_edit_text(
+                hwnd, max_group_edit_id, str(plan["group_end"])
+            )
+            print_line(
+                f"[UI] group_end edit <- {plan['group_end']} (control_id={max_group_edit_id})"
+            )
 
         checkbox_plan = plan.get("checkboxes")
         if isinstance(checkbox_plan, dict):
@@ -1199,7 +1421,9 @@ class GameTool:
             )
             return plan
 
-        button_key = BUTTON_ID_MAP.get(plan["launch_button"], BUTTON_ID_MAP[self.default_launch_button])
+        button_key = BUTTON_ID_MAP.get(
+            plan["launch_button"], BUTTON_ID_MAP[self.default_launch_button]
+        )
         button_id = parse_int(self.control_ids.get(button_key), 0)
         if button_id <= 0:
             raise RuntimeError(f"button id is not configured: {button_key}")
@@ -1213,10 +1437,20 @@ class GameTool:
     def prepare_bootstrap(self, use_sync: bool) -> Dict[str, Any]:
         return self.do_sync() if use_sync else self.load_cached_bootstrap()
 
-    def start_session(self, state: Dict[str, Any], reason: str, use_sync: bool, count_as_restart: bool) -> bool:
+    def start_session(
+        self, state: Dict[str, Any], reason: str, use_sync: bool, count_as_restart: bool
+    ) -> bool:
         bootstrap = self.prepare_bootstrap(use_sync=use_sync)
-        task = bootstrap.get("task", {}) if isinstance(bootstrap.get("task", {}), dict) else {}
-        control = bootstrap.get("control", {}) if isinstance(bootstrap.get("control", {}), dict) else {}
+        task = (
+            bootstrap.get("task", {})
+            if isinstance(bootstrap.get("task", {}), dict)
+            else {}
+        )
+        control = (
+            bootstrap.get("control", {})
+            if isinstance(bootstrap.get("control", {}), dict)
+            else {}
+        )
         runtime = self.get_runtime_state(state)
 
         if str(control.get("desired_run_state", "run")).strip().lower() == "stop":
@@ -1242,9 +1476,13 @@ class GameTool:
             resume_group = self.read_status_ini_group()
             if resume_group > 0:
                 skip_load_button = True
-                print_line(f"[RESUME] status.ini current group={resume_group}; skip writing configured start group")
+                print_line(
+                    f"[RESUME] status.ini current group={resume_group}; skip writing configured start group"
+                )
             else:
-                print_line("[RESUME] status.ini current group is unavailable; fallback to configured start group")
+                print_line(
+                    "[RESUME] status.ini current group is unavailable; fallback to configured start group"
+                )
 
         clear_open_games = bool(count_as_restart or reason == "daily_rollover")
         applied_plan = self.apply_bootstrap_to_window(
@@ -1270,7 +1508,9 @@ class GameTool:
             if runtime.get("restart_count_date", "") != today_str():
                 runtime["restart_count_date"] = today_str()
                 runtime["restart_count_today"] = 0
-            runtime["restart_count_today"] = parse_int(runtime.get("restart_count_today"), 0) + 1
+            runtime["restart_count_today"] = (
+                parse_int(runtime.get("restart_count_today"), 0) + 1
+            )
             runtime["last_restart_time"] = now_str()
             runtime["last_restart_epoch"] = int(time.time())
             runtime["last_restart_reason"] = reason
@@ -1283,12 +1523,16 @@ class GameTool:
             runtime["restart_count_date"] = today_str()
             runtime["restart_count_today"] = 0
 
-    def get_auto_restart_block_reason(self, runtime: Dict[str, Any], control: Dict[str, Any]) -> str:
+    def get_auto_restart_block_reason(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> str:
         self.ensure_restart_counter(runtime)
         max_restart_per_day = max(0, parse_int(control.get("max_restart_per_day"), 0))
-        restart_cooldown_seconds = max(0, parse_int(control.get("restart_cooldown_seconds"), 0))
+        restart_cooldown_seconds = max(
+            0, parse_int(control.get("restart_cooldown_seconds"), 0)
+        )
         if max_restart_per_day <= 0:
-            return "max_restart_per_day<=0?自动重启未启用"
+            return "max_restart_per_day<=0，自动重启未启用"
 
         restart_count_today = parse_int(runtime.get("restart_count_today"), 0)
         if restart_count_today >= max_restart_per_day:
@@ -1301,17 +1545,101 @@ class GameTool:
                 return f"冷却中，还需等待 {remaining} 秒 (cooldown={restart_cooldown_seconds}s)"
         return ""
 
-    def can_auto_restart(self, runtime: Dict[str, Any], control: Dict[str, Any]) -> bool:
+    def can_auto_restart(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> bool:
         return self.get_auto_restart_block_reason(runtime, control) == ""
 
-    def should_run_daily_schedule(self, runtime: Dict[str, Any], control: Dict[str, Any]) -> bool:
+    def compute_next_schedule_date(self, schedule: Tuple[int, int]) -> str:
+        now_local = time.localtime()
+        current_date = dt.date(now_local.tm_year, now_local.tm_mon, now_local.tm_mday)
+        now_minutes = now_local.tm_hour * 60 + now_local.tm_min
+        schedule_minutes = schedule[0] * 60 + schedule[1]
+        if now_minutes <= schedule_minutes:
+            return current_date.strftime("%Y-%m-%d")
+        return (current_date + dt.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    def advance_schedule_date(self, runtime: Dict[str, Any]) -> None:
+        next_schedule_date = str(runtime.get("next_schedule_date", "")).strip()
+        if next_schedule_date:
+            try:
+                base_date = dt.datetime.strptime(next_schedule_date, "%Y-%m-%d").date()
+            except ValueError:
+                base_date = dt.date.today()
+        else:
+            base_date = dt.date.today()
+        runtime["last_schedule_date"] = base_date.strftime("%Y-%m-%d")
+        runtime["next_schedule_date"] = (base_date + dt.timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+
+    def sync_schedule_runtime(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> bool:
+        schedule_text = str(control.get("schedule_daily_start", "")).strip()
+        schedule = parse_hhmm(schedule_text)
+        saved_schedule_text = str(runtime.get("schedule_daily_start", "")).strip()
+        changed = False
+
+        if schedule is None:
+            if (
+                saved_schedule_text
+                or str(runtime.get("next_schedule_date", "")).strip()
+            ):
+                runtime["schedule_daily_start"] = ""
+                runtime["next_schedule_date"] = ""
+                changed = True
+            self.schedule_runtime_initialized = True
+            return changed
+
+        should_realign = (
+            not self.schedule_runtime_initialized
+            or saved_schedule_text != schedule_text
+            or not str(runtime.get("next_schedule_date", "")).strip()
+        )
+        if should_realign:
+            runtime["schedule_daily_start"] = schedule_text
+            runtime["next_schedule_date"] = self.compute_next_schedule_date(schedule)
+            changed = True
+
+        self.schedule_runtime_initialized = True
+        return changed
+
+    def should_run_daily_schedule(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> bool:
         schedule = parse_hhmm(control.get("schedule_daily_start", ""))
-        if schedule is None or runtime.get("last_schedule_date", "") == today_str():
+        if schedule is None:
+            return False
+        next_schedule_date = str(runtime.get("next_schedule_date", "")).strip()
+        if next_schedule_date != today_str():
             return False
         now_local = time.localtime()
-        return (now_local.tm_hour * 60 + now_local.tm_min) >= (schedule[0] * 60 + schedule[1])
+        return (now_local.tm_hour * 60 + now_local.tm_min) >= (
+            schedule[0] * 60 + schedule[1]
+        )
 
-    def should_force_daily_relaunch(self, runtime: Dict[str, Any], control: Dict[str, Any]) -> bool:
+    def should_defer_auto_restart_until_schedule(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> bool:
+        schedule = parse_hhmm(control.get("schedule_daily_start", ""))
+        if schedule is None:
+            return False
+        if str(runtime.get("session_date", "")).strip() == today_str():
+            return False
+        next_schedule_date = str(runtime.get("next_schedule_date", "")).strip()
+        if not next_schedule_date:
+            return False
+        if next_schedule_date != today_str():
+            return True
+        now_local = time.localtime()
+        return (now_local.tm_hour * 60 + now_local.tm_min) < (
+            schedule[0] * 60 + schedule[1]
+        )
+
+    def should_force_daily_relaunch(
+        self, runtime: Dict[str, Any], control: Dict[str, Any]
+    ) -> bool:
         if str(control.get("desired_run_state", "run")).strip().lower() == "stop":
             return False
         if not self.is_process_running():
@@ -1325,7 +1653,12 @@ class GameTool:
         last_launch_date = time.strftime("%Y-%m-%d", time.localtime(last_launch_epoch))
         return last_launch_date != today_str()
 
-    def should_restart_for_missing_first_report(self, runtime: Dict[str, Any], remote_runtime: Dict[str, Any], control: Dict[str, Any]) -> bool:
+    def should_restart_for_missing_first_report(
+        self,
+        runtime: Dict[str, Any],
+        remote_runtime: Dict[str, Any],
+        control: Dict[str, Any],
+    ) -> bool:
         if not runtime.get("session_active", False):
             return False
         if remote_runtime.get("has_report", False):
@@ -1335,21 +1668,58 @@ class GameTool:
             return False
         if last_launch_epoch < self.agent_started_epoch:
             return False
-        startup_grace_seconds = max(30, parse_int(control.get("startup_grace_seconds"), self.startup_grace_seconds_fallback))
+        startup_grace_seconds = max(
+            30,
+            parse_int(
+                control.get("startup_grace_seconds"),
+                self.startup_grace_seconds_fallback,
+            ),
+        )
         return (time.time() - last_launch_epoch) >= startup_grace_seconds
 
-    def get_pending_restart_reason(self, runtime: Dict[str, Any], remote_runtime: Dict[str, Any], control: Dict[str, Any]) -> str:
+    def is_previous_day_stale(self, remote_runtime: Dict[str, Any]) -> bool:
+        if not (
+            remote_runtime.get("has_report", False)
+            and remote_runtime.get("stale", False)
+        ):
+            return False
+        server_time = str(remote_runtime.get("server_time", "")).strip()
+        if len(server_time) < 10:
+            return False
+        report_date = server_time[:10]
+        if report_date == today_str():
+            return False
+        return True
+
+    def get_pending_restart_reason(
+        self,
+        runtime: Dict[str, Any],
+        remote_runtime: Dict[str, Any],
+        control: Dict[str, Any],
+    ) -> str:
         if remote_runtime.get("completed", False):
             return ""
-        if self.should_restart_for_missing_first_report(runtime, remote_runtime, control):
+        if self.should_restart_for_missing_first_report(
+            runtime, remote_runtime, control
+        ):
             return "startup_no_report"
-        if remote_runtime.get("has_report", False) and remote_runtime.get("stale", False):
+        if self.is_previous_day_stale(remote_runtime):
+            return ""
+        if remote_runtime.get("has_report", False) and remote_runtime.get(
+            "stale", False
+        ):
             return "report_stale"
         return ""
 
-    def handle_one_shot_action(self, state: Dict[str, Any], control_doc: Dict[str, Any]) -> bool:
+    def handle_one_shot_action(
+        self, state: Dict[str, Any], control_doc: Dict[str, Any]
+    ) -> bool:
         runtime = self.get_runtime_state(state)
-        control = control_doc.get("control", {}) if isinstance(control_doc.get("control", {}), dict) else {}
+        control = (
+            control_doc.get("control", {})
+            if isinstance(control_doc.get("control", {}), dict)
+            else {}
+        )
         action = normalize_action(control.get("desired_action", ""))
         action_seq = max(0, parse_int(control.get("action_seq"), 0))
         last_action_seq = max(0, parse_int(runtime.get("last_action_seq"), 0))
@@ -1360,9 +1730,16 @@ class GameTool:
         if action == "sync_once":
             self.do_sync()
         elif action == "start_once":
-            self.start_session(state, reason="action:start_once", use_sync=True, count_as_restart=False)
+            self.start_session(
+                state, reason="action:start_once", use_sync=True, count_as_restart=False
+            )
         elif action == "restart_once":
-            self.start_session(state, reason="action:restart_once", use_sync=False, count_as_restart=True)
+            self.start_session(
+                state,
+                reason="action:restart_once",
+                use_sync=False,
+                count_as_restart=True,
+            )
         elif action == "stop_once":
             self.stop_qiannian(state, reason="action:stop_once", clear_session=True)
 
@@ -1372,15 +1749,23 @@ class GameTool:
         self.save_state(state)
         return True
 
-    def update_runtime_from_control(self, state: Dict[str, Any], control_doc: Dict[str, Any]) -> None:
+    def update_runtime_from_control(
+        self, state: Dict[str, Any], control_doc: Dict[str, Any]
+    ) -> None:
         runtime = self.get_runtime_state(state)
-        remote_runtime = control_doc.get("runtime", {}) if isinstance(control_doc.get("runtime", {}), dict) else {}
+        remote_runtime = (
+            control_doc.get("runtime", {})
+            if isinstance(control_doc.get("runtime", {}), dict)
+            else {}
+        )
         runtime["last_control_time"] = now_str()
         runtime["last_control_ok"] = True
         runtime["last_control_error"] = ""
         runtime["last_server_time"] = control_doc.get("server_time", "")
         runtime["last_remote_stale"] = bool(remote_runtime.get("stale", False))
-        runtime["last_remote_has_report"] = bool(remote_runtime.get("has_report", False))
+        runtime["last_remote_has_report"] = bool(
+            remote_runtime.get("has_report", False)
+        )
         runtime["last_remote_completed"] = bool(remote_runtime.get("completed", False))
         if remote_runtime.get("has_report", False):
             runtime["last_seen_report_time"] = remote_runtime.get("server_time", "")
@@ -1403,6 +1788,8 @@ class GameTool:
         print_line(f"[AGENT] 启动常驻模式, agent_id={self.agent_id}")
         while True:
             state = self.normalize_state_for_agent(self.load_state())
+            if self.normalize_runtime_for_today(state):
+                self.save_state(state)
             runtime = self.get_runtime_state(state)
             self.ensure_restart_counter(runtime)
             self.save_state(state)
@@ -1418,12 +1805,26 @@ class GameTool:
 
             state = self.normalize_state_for_agent(self.load_state())
             runtime = self.get_runtime_state(state)
-            control = control_doc.get("control", {}) if isinstance(control_doc.get("control", {}), dict) else {}
-            remote_runtime = control_doc.get("runtime", {}) if isinstance(control_doc.get("runtime", {}), dict) else {}
-            desired_run_state = str(control.get("desired_run_state", "run")).strip().lower() or "run"
+            control = (
+                control_doc.get("control", {})
+                if isinstance(control_doc.get("control", {}), dict)
+                else {}
+            )
+            remote_runtime = (
+                control_doc.get("runtime", {})
+                if isinstance(control_doc.get("runtime", {}), dict)
+                else {}
+            )
+            if self.sync_schedule_runtime(runtime, control):
+                self.save_state(state)
+            desired_run_state = (
+                str(control.get("desired_run_state", "run")).strip().lower() or "run"
+            )
 
             if desired_run_state == "stop":
-                self.stop_qiannian(state, reason="desired_run_state=stop", clear_session=True)
+                self.stop_qiannian(
+                    state, reason="desired_run_state=stop", clear_session=True
+                )
                 runtime["status"] = "stopped"
                 self.save_state(state)
                 time.sleep(self.control_poll_seconds)
@@ -1437,7 +1838,12 @@ class GameTool:
             self.ensure_restart_counter(runtime)
 
             if self.should_force_daily_relaunch(runtime, control):
-                if self.start_session(state, reason="daily_rollover", use_sync=True, count_as_restart=False):
+                if self.start_session(
+                    state,
+                    reason="daily_rollover",
+                    use_sync=True,
+                    count_as_restart=False,
+                ):
                     runtime = self.get_runtime_state(state)
                     runtime["last_schedule_date"] = today_str()
                     self.save_state(state)
@@ -1445,20 +1851,43 @@ class GameTool:
                 continue
 
             if self.should_run_daily_schedule(runtime, control):
-                if self.start_session(state, reason="daily_schedule", use_sync=True, count_as_restart=False):
-                    runtime = self.get_runtime_state(state)
-                    runtime["last_schedule_date"] = today_str()
-                    self.save_state(state)
+                started = self.start_session(
+                    state,
+                    reason="daily_schedule",
+                    use_sync=True,
+                    count_as_restart=False,
+                )
+                runtime = self.get_runtime_state(state)
+                runtime["last_schedule_result"] = (
+                    "started" if started else "skipped_disabled"
+                )
+                self.advance_schedule_date(runtime)
+                self.save_state(state)
 
             if bool(control.get("auto_restart_on_stale", False)):
-                pending_reason = self.get_pending_restart_reason(runtime, remote_runtime, control)
+                pending_reason = self.get_pending_restart_reason(
+                    runtime, remote_runtime, control
+                )
                 if pending_reason:
-                    block_reason = self.get_auto_restart_block_reason(runtime, control)
-                    if not block_reason:
-                        self.start_session(state, reason=pending_reason, use_sync=False, count_as_restart=True)
+                    if self.should_defer_auto_restart_until_schedule(runtime, control):
+                        print_line(
+                            f"[AGENT] auto restart deferred until schedule: pending={pending_reason} next_date={runtime.get('next_schedule_date', '-') or '-'} schedule={control.get('schedule_daily_start', '-') or '-'} session_date={runtime.get('session_date', '-') or '-'}"
+                        )
                     else:
-                        print_line(f"[AGENT] 自动重启已触发({pending_reason})，但当前阻塞: {block_reason}")
-
+                        block_reason = self.get_auto_restart_block_reason(
+                            runtime, control
+                        )
+                        if not block_reason:
+                            self.start_session(
+                                state,
+                                reason=pending_reason,
+                                use_sync=False,
+                                count_as_restart=True,
+                            )
+                        else:
+                            print_line(
+                                f"[AGENT] 自动重启已触发({pending_reason})，但当前阻塞: {block_reason}"
+                            )
             time.sleep(self.control_poll_seconds)
 
     def do_run(self) -> None:
@@ -1492,7 +1921,9 @@ def create_runtime_config_if_missing() -> bool:
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_FILE.exists():
-        raise RuntimeError(f"找不到配置文件: {CONFIG_FILE}。请先执行: python game_tool.py init")
+        raise RuntimeError(
+            f"找不到配置文件: {CONFIG_FILE}。请先执行 python game_tool.py init"
+        )
     user_config = load_json_file(CONFIG_FILE, default={}) or {}
     if not isinstance(user_config, dict):
         raise RuntimeError("game_tool_config.json 必须是 JSON 对象")
@@ -1505,8 +1936,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init", help="生成示例配置并创建目录")
     subparsers.add_parser("bootstrap", help="拉取 bootstrap 并打印摘要")
     subparsers.add_parser("control", help="拉取 agent control 信息")
-    subparsers.add_parser("status", help="show local runtime and remote control summary")
-    subparsers.add_parser("sync", help="拉取 bootstrap、manifest，并写入本地文件")
+    subparsers.add_parser(
+        "status", help="show local runtime and remote control summary"
+    )
+    subparsers.add_parser("sync", help="拉取 bootstrap 和 manifest，并写入本地文件")
     subparsers.add_parser("launch", help="直接启动 EXE")
     subparsers.add_parser("stop", help="stop local qiannian process and update runtime")
     subparsers.add_parser("run", help="先 sync，再启动 qiannian 并触发按钮")
@@ -1525,9 +1958,15 @@ def main() -> int:
             created = create_runtime_config_if_missing()
             tool = GameTool(load_config())
             tool.ensure_dirs()
-            print_line(f"已生成配置文件: {CONFIG_FILE}" if created else f"配置文件已存在: {CONFIG_FILE}")
+            print_line(
+                f"已生成配置文件: {CONFIG_FILE}"
+                if created
+                else f"配置文件已存在: {CONFIG_FILE}"
+            )
             print_line(f"示例配置文件: {EXAMPLE_CONFIG_FILE}")
-            print_line("请先修改 game_tool_config.json，再执行 bootstrap、control、run 或 agent")
+            print_line(
+                "请先修改 game_tool_config.json，再执行 bootstrap、control、run 或 agent"
+            )
             return 0
 
         tool = GameTool(load_config())

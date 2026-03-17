@@ -11,22 +11,27 @@
       "updated_at": "2026-03-12 20:35:14"
     }
   },
-  "agent_id": "VM-3-1",
+  "agent_id": "VM-3-2",
   "profile_version": "2026-03-12 20:25:22",
   "config_version": "",
   "manifest_version": "",
   "last_sync_time": "2026-03-12 20:35:14",
   "agent_runtime": {
-    "last_stop_reason": "pre-start:manual_run",
-    "last_stop_time": "2026-03-13 22:39:18",
-    "last_pid": 56920,
+    "last_stop_reason": "pre-start:manual_restart",
+    "last_stop_time": "2026-03-14 23:16:15",
+    "last_pid": 48424,
     "status": "running",
     "session_active": true,
-    "session_date": "2026-03-13",
-    "last_launch_time": "2026-03-13 22:39:42",
-    "last_launch_epoch": 1773412782,
-    "last_launch_reason": "manual_run",
+    "session_date": "2026-03-14",
+    "last_launch_time": "2026-03-14 23:16:40",
+    "last_launch_epoch": 1773501400,
+    "last_launch_reason": "manual_restart",
     "last_seen_report_time": "",
-    "last_seen_stale": false
+    "last_seen_stale": false,
+    "restart_count_date": "2026-03-15",
+    "restart_count_today": 0,
+    "last_restart_time": "2026-03-14 23:16:40",
+    "last_restart_epoch": 1773501400,
+    "last_restart_reason": "manual_restart"
   }
 }
