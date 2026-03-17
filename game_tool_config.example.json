@@ -1,4 +1,4 @@
-{
+﻿{
   "server": {
     "base_url": "http://127.0.0.1:18080",
     "agent_id": "VM-3-1",
@@ -42,5 +42,17 @@
       "log_file_checkbox": 1015,
       "log_detail_checkbox": 1017
     }
+  },
+  "window_cleanup": {
+    "enabled": false,
+    "timeout_seconds": 20,
+    "targets": [
+      {
+        "name": "example_game_window",
+        "process_name": "",
+        "window_class": "",
+        "window_title": ""
+      }
+    ]
   }
 }

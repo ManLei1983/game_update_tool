@@ -1,4 +1,4 @@
-{
+﻿{
   "server": {
     "base_url": "http://127.0.0.1:18080",
     "agent_id": "VM-3-2",
@@ -28,5 +28,24 @@
     "control_error_retry_seconds": 5,
     "launch_ready_seconds": 10,
     "post_load_delay_seconds": 5
+  },
+  "window_cleanup": {
+    "enabled": true,
+    "timeout_seconds": 20,
+    "targets": [
+      {
+        "name": "game_by_process",
+        "process_name": "Client.exe",
+        "window_class": "",
+        "window_title": ""
+      },
+      {
+        "name": "game_by_class",
+        "process_name": "",
+        "window_class": "TFrmM",
+        "window_title": ""
+      }
+		
+    ]
   }
 }
