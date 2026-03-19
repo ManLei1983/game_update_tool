@@ -111,9 +111,9 @@ class GameToolGui:
 
         toolbar = ttk.Frame(self.root, padding=(12, 10))
         toolbar.grid(row=0, column=0, sticky="ew")
-        for idx in range(10):
+        for idx in range(12):
             toolbar.columnconfigure(idx, weight=0)
-        toolbar.columnconfigure(9, weight=1)
+        toolbar.columnconfigure(11, weight=1)
 
         ttk.Button(toolbar, text="刷新状态", command=self.refresh_snapshot).grid(
             row=0, column=0, padx=(0, 8)
@@ -132,11 +132,14 @@ class GameToolGui:
         ttk.Button(toolbar, text="停止千年", command=self.stop_qiannian).grid(
             row=0, column=4, padx=(0, 8)
         )
-        ttk.Button(toolbar, text="手动运行一次", command=self.run_once).grid(
+        ttk.Button(toolbar, text="立即同步配置", command=self.sync_once).grid(
             row=0, column=5, padx=(0, 8)
         )
-        ttk.Button(toolbar, text="配置面板", command=self.open_config_window).grid(
+        ttk.Button(toolbar, text="同步并运行一次", command=self.run_once).grid(
             row=0, column=6, padx=(0, 8)
+        )
+        ttk.Button(toolbar, text="配置面板", command=self.open_config_window).grid(
+            row=0, column=7, padx=(0, 8)
         )
 
         ttk.Checkbutton(
@@ -144,8 +147,8 @@ class GameToolGui:
             text="自动刷新",
             variable=self.auto_refresh_var,
             command=self._on_toggle_auto_refresh,
-        ).grid(row=0, column=7, padx=(12, 6))
-        ttk.Label(toolbar, text="刷新间隔(秒)").grid(row=0, column=8, sticky="e")
+        ).grid(row=0, column=8, padx=(12, 6))
+        ttk.Label(toolbar, text="刷新间隔(秒)").grid(row=0, column=9, sticky="e")
         ttk.Spinbox(
             toolbar,
             from_=3,
@@ -153,50 +156,60 @@ class GameToolGui:
             textvariable=self.refresh_interval_var,
             width=6,
             command=self._on_toggle_auto_refresh,
-        ).grid(row=0, column=9, sticky="w")
+        ).grid(row=0, column=10, sticky="w")
 
-        assist_bar = ttk.LabelFrame(self.root, text="临时协助任务", padding=(12, 8))
-        assist_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-        for idx in range(12):
-            assist_bar.columnconfigure(idx, weight=0)
-        assist_bar.columnconfigure(7, weight=1)
+        quick_bar = ttk.LabelFrame(self.root, text="本机快捷入口", padding=(12, 8))
+        quick_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        for idx in range(6):
+            quick_bar.columnconfigure(idx, weight=0)
+        quick_bar.columnconfigure(1, weight=1)
 
-        self.assist_helper_var = tk.StringVar(value="-")
-        self.assist_target_var = tk.StringVar(value="")
-        self.assist_region_var = tk.StringVar(value="")
-        self.assist_start_var = tk.StringVar(value="")
-        self.assist_end_var = tk.StringVar(value="")
+        self.assist_status_var = tk.StringVar(value="当前未接到临时协助任务")
 
-        ttk.Label(assist_bar, text="当前 Helper").grid(row=0, column=0, sticky="w")
-        ttk.Label(assist_bar, textvariable=self.assist_helper_var).grid(
-            row=0, column=1, sticky="w", padx=(0, 12)
+        ttk.Label(quick_bar, text="当前协助").grid(
+            row=0, column=0, sticky="nw", padx=(0, 8)
         )
-        ttk.Label(assist_bar, text="目标 VM").grid(row=0, column=2, sticky="w")
-        ttk.Entry(assist_bar, textvariable=self.assist_target_var, width=14).grid(
-            row=0, column=3, sticky="w", padx=(0, 12)
-        )
-        ttk.Label(assist_bar, text="区服").grid(row=0, column=4, sticky="w")
-        ttk.Entry(assist_bar, textvariable=self.assist_region_var, width=10).grid(
-            row=0, column=5, sticky="w", padx=(0, 12)
-        )
-        ttk.Label(assist_bar, text="接手开始组").grid(row=0, column=6, sticky="w")
-        ttk.Entry(assist_bar, textvariable=self.assist_start_var, width=8).grid(
-            row=0, column=7, sticky="w", padx=(0, 12)
-        )
-        ttk.Label(assist_bar, text="接手结束组").grid(row=0, column=8, sticky="w")
-        ttk.Entry(assist_bar, textvariable=self.assist_end_var, width=8).grid(
-            row=0, column=9, sticky="w", padx=(0, 12)
-        )
+        ttk.Label(
+            quick_bar,
+            textvariable=self.assist_status_var,
+            justify=tk.LEFT,
+            wraplength=980,
+        ).grid(row=0, column=1, columnspan=5, sticky="ew")
+        ttk.Label(
+            quick_bar,
+            text="协助任务请在 local_report console 配置；本机只负责同步和执行。",
+        ).grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 8))
+
         ttk.Button(
-            assist_bar,
-            text="保存协助并运行一次",
-            command=self.save_assist_and_run_once,
-        ).grid(row=0, column=10, padx=(0, 8))
+            quick_bar,
+            text="打开 game_tool 配置",
+            command=self.open_game_tool_config,
+        ).grid(row=2, column=0, padx=(0, 8), pady=(0, 4), sticky="w")
         ttk.Button(
-            assist_bar,
-            text="清除当前协助任务",
-            command=self.clear_current_assist,
-        ).grid(row=0, column=11)
+            quick_bar,
+            text="打开 GlobalConfig.ini",
+            command=self.open_global_config_ini,
+        ).grid(row=2, column=1, padx=(0, 8), pady=(0, 4), sticky="w")
+        ttk.Button(
+            quick_bar,
+            text="打开 state.json",
+            command=self.open_state_file,
+        ).grid(row=2, column=2, padx=(0, 8), pady=(0, 4), sticky="w")
+        ttk.Button(
+            quick_bar,
+            text="打开 bootstrap.json",
+            command=self.open_bootstrap_file,
+        ).grid(row=3, column=0, padx=(0, 8), sticky="w")
+        ttk.Button(
+            quick_bar,
+            text="打开 QianNian 目录",
+            command=self.open_qiannian_dir,
+        ).grid(row=3, column=1, padx=(0, 8), sticky="w")
+        ttk.Button(
+            quick_bar,
+            text="打开 account 目录",
+            command=self.open_account_dir,
+        ).grid(row=3, column=2, padx=(0, 8), sticky="w")
 
         overview = ttk.Frame(self.root, padding=(12, 0, 12, 10))
         overview.grid(row=2, column=0, sticky="nsew")
@@ -337,7 +350,12 @@ class GameToolGui:
         profile_group_start = task.get("profile_group_start", task.get("group_start", "-"))
         profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
 
-        self.assist_helper_var.set(repair_text(snapshot.get("agent_id") or "-"))
+        assist_summary = (
+            assist.get("summary", "") if isinstance(assist, dict) else ""
+        )
+        self.assist_status_var.set(
+            repair_text(str(assist_summary or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1"))
+        )
         self._set_var("agent_id", snapshot.get("agent_id"))
         self._set_var("base_url", snapshot.get("base_url"))
         self._set_var("region", task.get("region", "-"))
@@ -351,7 +369,7 @@ class GameToolGui:
         )
         self._set_var(
             "assist_summary",
-            assist.get("summary", "") if isinstance(assist, dict) else "-",
+            assist_summary or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1",
         )
         self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
         self._set_var("desired_run_state", control.get("desired_run_state", "-"))
@@ -546,7 +564,7 @@ class GameToolGui:
             try:
                 self._schedule_log(f"{title}: 开始")
                 func()
-                self._schedule_log(f"{title}: 开始")
+                self._schedule_log(f"{title}: 完成")
             except Exception as exc:
                 self._schedule_log(f"{title}: 失败 -> {exc}")
                 self.root.after(0, lambda: messagebox.showerror(title, repair_text(str(exc))))
@@ -662,72 +680,52 @@ class GameToolGui:
         tool.ensure_dirs()
         return tool
 
-    def _require_agent_stopped(self) -> None:
-        if self._find_agent_processes():
-            raise RuntimeError("请先停止后台 Agent，再执行这个操作，避免 agent 与手动 run 并发")
-
-    def save_assist_and_run_once(self) -> None:
+    def _open_path(self, target: Path, title: str) -> None:
         def action() -> None:
-            self._require_agent_stopped()
-            tool = self._create_tool()
-            helper_agent_id = str(tool.agent_id or "").strip()
-            target_agent_id = self.assist_target_var.get().strip()
-            region = self.assist_region_var.get().strip()
-            delegate_start = core.parse_int(self.assist_start_var.get(), 0)
-            delegate_end = core.parse_int(self.assist_end_var.get(), 0)
-            if not helper_agent_id:
-                raise RuntimeError("当前 game_tool 未配置 agent_id")
-            if not target_agent_id:
-                raise RuntimeError("目标 VM 不能为空")
-            if delegate_start <= 0 or delegate_end <= 0:
-                raise RuntimeError("接手开始组和结束组都必须大于 0")
-            if delegate_end < delegate_start:
-                raise RuntimeError("接手结束组不能小于接手开始组")
-            response = tool.post_json(
-                "/api/agent/assist/assign",
-                {
-                    "helper_agent_id": helper_agent_id,
-                    "target_agent_id": target_agent_id,
-                    "region": region,
-                    "delegate_start": delegate_start,
-                    "delegate_end": delegate_end,
-                },
-            )
-            assist = (
-                response.get("assist", {})
-                if isinstance(response.get("assist", {}), dict)
-                else {}
-            )
-            summary = repair_text(str(assist.get("summary", "") or "临时协助任务已保存"))
-            effective_end = core.parse_int(response.get("target_effective_group_end"), 0)
-            self._schedule_log(f"已保存临时协助任务: {summary}")
-            if effective_end > 0:
-                self._schedule_log(f"目标 VM 今日有效结束组已更新为 {effective_end}")
-            self._run_cli_once("run")
-
-        self._run_background_action("保存协助并运行一次", action)
-
-    def clear_current_assist(self) -> None:
-        def action() -> None:
-            self._require_agent_stopped()
-            tool = self._create_tool()
-            helper_agent_id = str(tool.agent_id or "").strip()
-            if not helper_agent_id:
-                raise RuntimeError("当前 game_tool 未配置 agent_id")
-            response = tool.post_json(
-                "/api/agent/assist/clear",
-                {"helper_agent_id": helper_agent_id},
-            )
-            removed = core.parse_int(response.get("removed"), 0)
-            if removed > 0:
-                self._schedule_log("已清除当前临时协助任务")
+            path = Path(target)
+            open_target = path
+            if not open_target.exists():
+                if path.parent.exists():
+                    open_target = path.parent
+                    self._schedule_log(f"{title} 不存在，已打开上级目录: {open_target}")
+                else:
+                    raise RuntimeError(f"{title} 不存在: {path}")
+            if os.name == "nt":
+                os.startfile(str(open_target))
             else:
-                self._schedule_log("当前没有可清除的临时协助任务")
+                subprocess.Popen(["xdg-open", str(open_target)])
+            self._schedule_log(f"已打开 {title}: {open_target}")
 
-        self._run_background_action("清除当前协助任务", action)
+        self._run_background_action(f"打开 {title}", action)
+
+    def open_game_tool_config(self) -> None:
+        self._open_path(core.CONFIG_FILE, "game_tool_config.json")
+
+    def open_global_config_ini(self) -> None:
+        tool = self._create_tool()
+        self._open_path(tool.get_global_config_ini_path(), "GlobalConfig.ini")
+
+    def open_state_file(self) -> None:
+        tool = self._create_tool()
+        self._open_path(tool.state_file, "state.json")
+
+    def open_bootstrap_file(self) -> None:
+        tool = self._create_tool()
+        self._open_path(tool.bootstrap_file, "bootstrap.json")
+
+    def open_qiannian_dir(self) -> None:
+        tool = self._create_tool()
+        self._open_path(tool.get_launch_base_dir(), "QianNian 目录")
+
+    def open_account_dir(self) -> None:
+        tool = self._create_tool()
+        self._open_path(tool.get_launch_base_dir() / "account", "account 目录")
+
+    def sync_once(self) -> None:
+        self._run_background_action("立即同步配置", lambda: self._run_cli_once("sync"))
 
     def run_once(self) -> None:
-        self._run_background_action("手动运行一次", lambda: self._run_cli_once("run"))
+        self._run_background_action("同步并运行一次", lambda: self._run_cli_once("run"))
 
     def on_close(self) -> None:
         if messagebox.askyesno(
