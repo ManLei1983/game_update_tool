@@ -1,0 +1,568 @@
+import json
+import locale
+import os
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import messagebox, scrolledtext, ttk
+from typing import Any, Dict, List, Optional
+
+import game_tool as core
+from game_tool_gui_config import ConfigEditorWindow
+
+
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+
+def decode_cli_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    encodings: List[str] = ["utf-8-sig"]
+    preferred = locale.getpreferredencoding(False) or ""
+    if preferred and preferred.lower() not in {item.lower() for item in encodings}:
+        encodings.append(preferred)
+    for extra in ("gbk", "utf-16", "latin-1"):
+        if extra.lower() not in {item.lower() for item in encodings}:
+            encodings.append(extra)
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode(encodings[0], errors="replace")
+
+
+class GameToolGui:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("game_tool 控制面板")
+        self.root.geometry("1380x960")
+        self.root.minsize(1180, 820)
+
+        core.create_example_config()
+        if not core.CONFIG_FILE.exists():
+            core.create_runtime_config_if_missing()
+
+        self.refresh_running = False
+        self.refresh_after_id: Optional[str] = None
+        self.agent_launching = False
+        self.auto_refresh_var = tk.BooleanVar(value=True)
+        self.refresh_interval_var = tk.IntVar(value=5)
+
+        self.summary_vars: Dict[str, tk.StringVar] = {}
+        core.print_line = lambda message: self._schedule_log(str(message))
+        self.config_window: Optional[ConfigEditorWindow] = None
+        self._build_ui()
+        self._schedule_log("GUI ready")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.after(200, self.refresh_snapshot)
+
+    def _build_ui(self) -> None:
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=3)
+        self.root.rowconfigure(2, weight=2)
+
+        toolbar = ttk.Frame(self.root, padding=(12, 10))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        for idx in range(10):
+            toolbar.columnconfigure(idx, weight=0)
+        toolbar.columnconfigure(9, weight=1)
+
+        ttk.Button(toolbar, text="刷新状态", command=self.refresh_snapshot).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(toolbar, text="启动 Agent", command=self.start_agent).grid(
+            row=0, column=1, padx=(0, 8)
+        )
+        ttk.Button(
+            toolbar,
+            text="跳过今天并启动",
+            command=self.skip_today_and_start_agent,
+        ).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(toolbar, text="停止 Agent", command=self.stop_agent).grid(
+            row=0, column=3, padx=(0, 8)
+        )
+        ttk.Button(toolbar, text="停止千年", command=self.stop_qiannian).grid(
+            row=0, column=4, padx=(0, 8)
+        )
+        ttk.Button(toolbar, text="手动运行一次", command=self.run_once).grid(
+            row=0, column=5, padx=(0, 8)
+        )
+
+        ttk.Button(toolbar, text="配置面板", command=self.open_config_window).grid(
+            row=0, column=6, padx=(0, 8)
+        )
+
+        ttk.Checkbutton(
+            toolbar,
+            text="自动刷新",
+            variable=self.auto_refresh_var,
+            command=self._on_toggle_auto_refresh,
+        ).grid(row=0, column=7, padx=(12, 6))
+        ttk.Label(toolbar, text="刷新间隔(秒)").grid(row=0, column=8, sticky="e")
+        ttk.Spinbox(
+            toolbar,
+            from_=3,
+            to=60,
+            textvariable=self.refresh_interval_var,
+            width=6,
+            command=self._on_toggle_auto_refresh,
+        ).grid(row=0, column=9, sticky="w")
+
+        overview = ttk.Frame(self.root, padding=(12, 0, 12, 10))
+        overview.grid(row=1, column=0, sticky="nsew")
+        overview.columnconfigure(0, weight=1)
+        overview.columnconfigure(1, weight=1)
+        overview.rowconfigure(0, weight=1)
+        overview.rowconfigure(1, weight=1)
+
+        left_top = ttk.LabelFrame(overview, text="任务配置", padding=10)
+        left_top.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        right_top = ttk.LabelFrame(overview, text="本地状态", padding=10)
+        right_top.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        left_bottom = ttk.LabelFrame(overview, text="远端状态", padding=10)
+        left_bottom.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
+        right_bottom = ttk.LabelFrame(overview, text="执行判断", padding=10)
+        right_bottom.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
+
+        self._build_kv_grid(
+            left_top,
+            [
+                ("Agent ID", "agent_id"),
+                ("Server", "base_url"),
+                ("区服", "region"),
+                ("组范围", "group_range"),
+                ("计划时间", "schedule_daily_start"),
+                ("期望状态", "desired_run_state"),
+                ("自动恢复", "auto_restart"),
+                ("启动 EXE", "exe_path"),
+            ],
+        )
+        self._build_kv_grid(
+            right_top,
+            [
+                ("本地状态", "local_status"),
+                ("Session Active", "session_active"),
+                ("下次计划日期", "next_schedule_date"),
+                ("最近启动时间", "last_launch_time"),
+                ("启动原因", "last_launch_reason"),
+                ("最近停止时间", "last_stop_time"),
+                ("停止原因", "last_stop_reason"),
+                ("Agent 进程", "agent_process"),
+                ("千年进程", "qiannian_running"),
+                ("status.ini", "status_ini"),
+            ],
+        )
+        self._build_kv_grid(
+            left_bottom,
+            [
+                ("远端上报", "remote_has_report"),
+                ("远端超时", "remote_stale"),
+                ("远端完成", "remote_completed"),
+                ("最后上报时间", "remote_server_time"),
+                ("已过秒数", "remote_elapsed"),
+                ("当前组", "remote_group"),
+                ("角色索引", "remote_role_index"),
+                ("事件", "remote_event"),
+                ("控制拉取错误", "control_error"),
+            ],
+        )
+        self._build_kv_grid(
+            right_bottom,
+            [
+                ("本地完成判断", "local_completed"),
+                ("目标结束组", "local_target_group_end"),
+                ("完成角色阈值", "local_complete_role_index"),
+                ("今天是否续跑", "should_resume_today"),
+                ("待触发重启原因", "pending_restart_reason"),
+                ("重启计数", "restart_counter"),
+                ("最近进度", "last_progress"),
+                ("本地日期", "status_date"),
+            ],
+        )
+
+        bottom = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
+        bottom.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+
+        raw_frame = ttk.LabelFrame(bottom, text="原始快照", padding=8)
+        log_frame = ttk.LabelFrame(bottom, text="GUI 日志", padding=8)
+        bottom.add(raw_frame, weight=3)
+        bottom.add(log_frame, weight=2)
+
+        raw_frame.rowconfigure(0, weight=1)
+        raw_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+
+        self.raw_text = scrolledtext.ScrolledText(raw_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.raw_text.grid(row=0, column=0, sticky="nsew")
+        self.raw_text.configure(state=tk.DISABLED)
+
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _build_kv_grid(self, parent: ttk.LabelFrame, rows: List[tuple[str, str]]) -> None:
+        parent.columnconfigure(1, weight=1)
+        for row_index, (label_text, key) in enumerate(rows):
+            ttk.Label(parent, text=label_text).grid(
+                row=row_index, column=0, sticky="nw", padx=(0, 12), pady=3
+            )
+            var = tk.StringVar(value="-")
+            self.summary_vars[key] = var
+            ttk.Label(parent, textvariable=var, anchor="w", justify=tk.LEFT).grid(
+                row=row_index, column=1, sticky="ew", pady=3
+            )
+
+    def _append_log(self, message: str) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _schedule_log(self, message: str) -> None:
+        self.root.after(0, self._append_log, message)
+
+    def _set_var(self, key: str, value: Any) -> None:
+        self.summary_vars[key].set("-" if value in (None, "") else str(value))
+
+    def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        task = snapshot.get("task", {})
+        control = snapshot.get("control", {})
+        runtime = snapshot.get("runtime", {})
+        remote = snapshot.get("remote_runtime", {})
+        local = snapshot.get("local_completion", {})
+        progress = snapshot.get("status_progress", {})
+        agent_processes = snapshot.get("agent_processes", [])
+        control_error = snapshot.get("control_error", "")
+
+        self._set_var("agent_id", snapshot.get("agent_id"))
+        self._set_var("base_url", snapshot.get("base_url"))
+        self._set_var("region", task.get("region", "-"))
+        self._set_var(
+            "group_range",
+            f"{task.get('group_start', '-') } -> {task.get('group_end', '-')}",
+        )
+        self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
+        self._set_var("desired_run_state", control.get("desired_run_state", "-"))
+        self._set_var("auto_restart", bool(control.get("auto_restart_on_stale", False)))
+        self._set_var("exe_path", snapshot.get("exe_path"))
+
+        self._set_var("local_status", runtime.get("status", "-"))
+        self._set_var("session_active", bool(runtime.get("session_active", False)))
+        self._set_var("next_schedule_date", runtime.get("next_schedule_date", "-"))
+        self._set_var("last_launch_time", runtime.get("last_launch_time", "-"))
+        self._set_var("last_launch_reason", runtime.get("last_launch_reason", "-"))
+        self._set_var("last_stop_time", runtime.get("last_stop_time", "-"))
+        self._set_var("last_stop_reason", runtime.get("last_stop_reason", "-"))
+        self._set_var(
+            "agent_process",
+            f"running ({', '.join(str(item.get('ProcessId')) for item in agent_processes)})"
+            if agent_processes
+            else "not running",
+        )
+        self._set_var("qiannian_running", snapshot.get("qiannian_running", False))
+        self._set_var(
+            "status_ini",
+            f"group={progress.get('group', 0)} role={progress.get('role_index', 0)} is_today={progress.get('is_today', False)}",
+        )
+
+        self._set_var("remote_has_report", bool(remote.get("has_report", False)))
+        self._set_var("remote_stale", bool(remote.get("stale", False)))
+        self._set_var("remote_completed", bool(remote.get("completed", False)))
+        self._set_var("remote_server_time", remote.get("server_time", "-"))
+        self._set_var("remote_elapsed", remote.get("elapsed", "-"))
+        self._set_var("remote_group", remote.get("current_group", "-"))
+        self._set_var("remote_role_index", remote.get("role_index", "-"))
+        self._set_var("remote_event", remote.get("event", "-"))
+        self._set_var("control_error", control_error or "-")
+
+        self._set_var("local_completed", bool(local.get("completed", False)))
+        self._set_var("local_target_group_end", local.get("target_group_end", "-"))
+        self._set_var(
+            "local_complete_role_index", local.get("complete_role_index", "-")
+        )
+        self._set_var("should_resume_today", snapshot.get("should_resume_today", False))
+        self._set_var("pending_restart_reason", snapshot.get("pending_restart_reason", "-"))
+        self._set_var(
+            "restart_counter",
+            f"{runtime.get('restart_count_today', 0)} / {runtime.get('restart_count_date', '-') or '-'}",
+        )
+        self._set_var(
+            "last_progress",
+            f"group={runtime.get('last_seen_group', '-')} role={runtime.get('last_seen_role_index', '-')}",
+        )
+        self._set_var("status_date", progress.get("last_reset_date", "-"))
+
+        self.raw_text.configure(state=tk.NORMAL)
+        self.raw_text.delete("1.0", tk.END)
+        self.raw_text.insert(
+            tk.END,
+            json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
+        )
+        self.raw_text.configure(state=tk.DISABLED)
+
+    def _build_snapshot(self) -> Dict[str, Any]:
+        config = core.load_config()
+        tool = core.GameTool(config)
+        tool.ensure_dirs()
+
+        state = tool.normalize_state_for_agent(tool.load_state())
+        if tool.normalize_runtime_for_today(state):
+            tool.save_state(state)
+        runtime = tool.get_runtime_state(state)
+        tool.ensure_restart_counter(runtime)
+        tool.save_state(state)
+
+        control_doc: Dict[str, Any] = {}
+        control: Dict[str, Any] = {}
+        task: Dict[str, Any] = {}
+        remote_runtime: Dict[str, Any] = {}
+        control_error = ""
+
+        try:
+            control_doc = tool.fetch_control()
+            tool.update_runtime_from_control(state, control_doc)
+            state = tool.normalize_state_for_agent(tool.load_state())
+            runtime = tool.get_runtime_state(state)
+            control = (
+                control_doc.get("control", {})
+                if isinstance(control_doc.get("control", {}), dict)
+                else {}
+            )
+            task = (
+                control_doc.get("task", {})
+                if isinstance(control_doc.get("task", {}), dict)
+                else {}
+            )
+            remote_runtime = (
+                control_doc.get("runtime", {})
+                if isinstance(control_doc.get("runtime", {}), dict)
+                else {}
+            )
+        except Exception as exc:
+            control_error = str(exc)
+
+        progress = tool.read_status_ini_progress()
+        local_completion = tool.get_local_completion_state(task, control)
+        should_resume_today = False
+        pending_restart_reason = ""
+        if task or control:
+            should_resume_today = tool.should_resume_pending_session(runtime, control, task)
+            pending_restart_reason = tool.get_pending_restart_reason(
+                runtime, remote_runtime, control, task
+            )
+
+        return {
+            "agent_id": tool.agent_id,
+            "base_url": tool.base_url,
+            "exe_path": str(tool.exe_path),
+            "task": task,
+            "control": control,
+            "runtime": dict(runtime),
+            "remote_runtime": remote_runtime,
+            "status_progress": progress,
+            "local_completion": local_completion,
+            "should_resume_today": should_resume_today,
+            "pending_restart_reason": pending_restart_reason,
+            "control_error": control_error,
+            "agent_processes": self._find_agent_processes(),
+            "qiannian_running": tool.is_process_running(),
+        }
+
+    def refresh_snapshot(self) -> None:
+        if self.refresh_running:
+            return
+        self.refresh_running = True
+
+        def worker() -> None:
+            try:
+                snapshot = self._build_snapshot()
+                self.root.after(0, self._render_snapshot, snapshot)
+                self._schedule_log("状态已刷新")
+            except Exception as exc:
+                self._schedule_log(f"刷新失败: {exc}")
+            finally:
+                self.refresh_running = False
+                if self.auto_refresh_var.get():
+                    self._schedule_next_refresh()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _schedule_next_refresh(self) -> None:
+        if self.refresh_after_id is not None:
+            self.root.after_cancel(self.refresh_after_id)
+            self.refresh_after_id = None
+        interval = max(3, int(self.refresh_interval_var.get() or 5))
+        self.refresh_after_id = self.root.after(interval * 1000, self.refresh_snapshot)
+
+    def _on_toggle_auto_refresh(self) -> None:
+        if self.auto_refresh_var.get():
+            self.refresh_snapshot()
+        elif self.refresh_after_id is not None:
+            self.root.after_cancel(self.refresh_after_id)
+            self.refresh_after_id = None
+
+    def _run_cli_once(self, subcommand: str) -> str:
+        cmd = self._build_cli_command(subcommand)
+        completed = subprocess.run(
+            cmd,
+            cwd=str(core.SCRIPT_DIR),
+            capture_output=True,
+            text=False,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+        output = decode_cli_output((completed.stdout or b"") + (completed.stderr or b""))
+        output = output.strip()
+        if output:
+            for line in output.splitlines():
+                self._schedule_log(line)
+        if completed.returncode != 0:
+            raise RuntimeError(f"{subcommand} failed: exit_code={completed.returncode}")
+        return output
+
+    def _run_background_action(self, title: str, func) -> None:
+        def worker() -> None:
+            try:
+                self._schedule_log(f"{title}: 开始")
+                func()
+                self._schedule_log(f"{title}: 完成")
+            except Exception as exc:
+                self._schedule_log(f"{title}: 失败 -> {exc}")
+                self.root.after(0, lambda: messagebox.showerror(title, str(exc)))
+            finally:
+                self.root.after(0, self.refresh_snapshot)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_cli_command(self, subcommand: str) -> List[str]:
+        cli_exe = core.SCRIPT_DIR / "game_tool.exe"
+        cli_py = core.SCRIPT_DIR / "game_tool.py"
+        if getattr(sys, "frozen", False) and cli_exe.exists():
+            return [str(cli_exe), subcommand]
+        if cli_exe.exists() and core.SCRIPT_DIR != Path(sys.executable).resolve().parent:
+            return [str(cli_exe), subcommand]
+        return [sys.executable, str(cli_py), subcommand]
+
+    def _find_agent_processes(self) -> List[Dict[str, Any]]:
+        if os.name != "nt":
+            return []
+        tool = core.GameTool(core.load_config())
+        results: List[Dict[str, Any]] = []
+        for pid in tool.list_process_pids("game_tool.exe"):
+            if pid > 0:
+                results.append({"pid": pid, "name": "game_tool.exe"})
+        return results
+
+    def _kill_agent_processes(self) -> int:
+        processes = self._find_agent_processes()
+        killed = 0
+        for item in processes:
+            pid = core.parse_int(item.get("pid"), 0)
+            if pid <= 0:
+                continue
+            completed = core.run_hidden_subprocess(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=False,
+                check=False,
+            )
+            if completed.returncode == 0:
+                killed += 1
+                self._schedule_log(f"已终止 agent 进程 pid={pid}")
+        return killed
+
+    def start_agent(self) -> None:
+        if self.agent_launching:
+            return
+        self.agent_launching = True
+
+        def action() -> None:
+            processes = self._find_agent_processes()
+            if processes:
+                raise RuntimeError("检测到 agent 已在运行，先停止旧 agent 再重新启动")
+            cmd = self._build_cli_command("agent")
+            subprocess.Popen(
+                cmd,
+                cwd=str(core.SCRIPT_DIR),
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._schedule_log("已在后台启动 agent")
+
+        def wrapped() -> None:
+            try:
+                action()
+            finally:
+                self.agent_launching = False
+
+        self._run_background_action("启动 Agent", wrapped)
+
+    def skip_today_and_start_agent(self) -> None:
+        def action() -> None:
+            self._run_cli_once("skip-today")
+            time.sleep(0.5)
+            processes = self._find_agent_processes()
+            if processes:
+                raise RuntimeError("skip-today 执行后检测到 agent 已在运行，请先停止旧 agent")
+            cmd = self._build_cli_command("agent")
+            subprocess.Popen(
+                cmd,
+                cwd=str(core.SCRIPT_DIR),
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._schedule_log("已执行 skip-today 并在后台启动 agent")
+
+        self._run_background_action("跳过今天并启动", action)
+
+    def stop_agent(self) -> None:
+        def action() -> None:
+            killed = self._kill_agent_processes()
+            self._run_cli_once("stop")
+            if killed == 0:
+                self._schedule_log("未检测到运行中的 agent 进程，已执行 stop")
+
+        self._run_background_action("停止 Agent", action)
+
+    def stop_qiannian(self) -> None:
+        self._run_background_action("停止千年", lambda: self._run_cli_once("stop"))
+
+    def open_config_window(self) -> None:
+        if self.config_window is not None and self.config_window.winfo_exists():
+            self.config_window.focus_force()
+            self.config_window.lift()
+            return
+        self.config_window = ConfigEditorWindow(self.root, self._schedule_log)
+
+    def run_once(self) -> None:
+        self._run_background_action("手动运行一次", lambda: self._run_cli_once("run"))
+
+    def on_close(self) -> None:
+        if messagebox.askyesno(
+            "关闭控制面板",
+            "关闭后不会自动停止已在后台运行的 agent。\n是否继续关闭？",
+        ):
+            self.root.destroy()
+
+
+def main() -> int:
+    root = tk.Tk()
+    style = ttk.Style(root)
+    if "vista" in style.theme_names():
+        style.theme_use("vista")
+    gui = GameToolGui(root)
+    gui._schedule_log(f"Config: {core.CONFIG_FILE}")
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
