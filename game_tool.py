@@ -2005,7 +2005,6 @@ class GameTool:
         self,
         bootstrap: Dict[str, Any],
         resume_group: int = 0,
-        resume_role_index: int = 0,
         skip_load_button: bool = False,
         force_load_button: bool = False,
     ) -> Dict[str, Any]:
@@ -2066,7 +2065,6 @@ class GameTool:
             }
         if resume_group > 0:
             group_start = resume_group
-            role_index = max(0, parse_int(resume_role_index, role_index))
         return {
             "region": str(region or "").strip(),
             "group_start": parse_int(group_start, 0),
@@ -2087,7 +2085,6 @@ class GameTool:
         pid: int,
         bootstrap: Dict[str, Any],
         resume_group: int = 0,
-        resume_role_index: int = 0,
         skip_load_button: bool = False,
     ) -> Dict[str, Any]:
         if not self.ui_enabled:
@@ -2098,10 +2095,16 @@ class GameTool:
         hwnd, startup_dialog_confirmed = self.dialog_controller.find_main_window_ready(
             pid, self.window_find_timeout_seconds
         )
+        effective_resume_group = resume_group
+        if startup_dialog_confirmed:
+            if resume_group > 0:
+                print_line(
+                    f"[UI] completion dialog detected; ignore resume_group={resume_group} and restart from configured group"
+                )
+            effective_resume_group = 0
         plan = self.build_ui_plan(
             bootstrap,
-            resume_group=resume_group,
-            resume_role_index=resume_role_index,
+            resume_group=effective_resume_group,
             skip_load_button=skip_load_button,
             force_load_button=startup_dialog_confirmed,
         )
@@ -2128,15 +2131,16 @@ class GameTool:
                 plan.get("force_load_button", False)
             )
             if should_click_load_button:
+                role_index_to_write = 0 if plan.get("force_load_button", False) else plan["role_index"]
                 self.dialog_controller.set_edit_text(
-                    hwnd, role_index_edit_id, str(plan["role_index"])
+                    hwnd, role_index_edit_id, str(role_index_to_write)
                 )
                 print_line(
-                    f"[UI] role_index edit <- {plan['role_index']} (control_id={role_index_edit_id})"
+                    f"[UI] role_index edit <- {role_index_to_write} (control_id={role_index_edit_id})"
                 )
                 if plan["skip_load_button"] and plan.get("force_load_button", False):
                     print_line(
-                        "[UI] startup completion dialog accepted; click load_button once to clear qiannian completion prompt"
+                        "[UI] startup completion dialog accepted; reset role_index to 0 and click load_button once to clear qiannian completion prompt"
                     )
                 self.dialog_controller.click_button(hwnd, load_button_id)
                 print_line(f"[UI] clicked load_button (control_id={load_button_id})")
@@ -2275,7 +2279,6 @@ class GameTool:
             pid,
             bootstrap,
             resume_group=resume_group,
-            resume_role_index=status_role_index,
             skip_load_button=skip_load_button,
         )
         time.sleep(self.launch_settle_seconds)
