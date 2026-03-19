@@ -62,6 +62,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "window_find_timeout_seconds": 60,
         "launch_ready_seconds": 20,
         "post_load_delay_seconds": 2,
+        "load_confirm_timeout_seconds": 3,
         "launch_settle_seconds": 8,
         "post_clear_game_delay_seconds": 5,
         "startup_grace_seconds_fallback": 300,
@@ -536,28 +537,37 @@ class Win32DialogController:
 
     def confirm_message_box(
         self, pid: int, owner_hwnd: int = 0, timeout_seconds: int = 5
-    ) -> bool:
-        deadline = time.time() + max(1, timeout_seconds)
-        seen_dialog = False
-        while time.time() < deadline:
+    ) -> str:
+        detect_deadline = time.time() + max(0, timeout_seconds)
+        dialog_hwnd = 0
+        while time.time() < detect_deadline:
             dialog_hwnd = self._find_top_window_once(
                 pid,
                 class_name="#32770",
                 exclude_hwnd=owner_hwnd,
             )
-            if not dialog_hwnd:
-                if seen_dialog:
-                    return True
-                time.sleep(0.2)
-                continue
+            if dialog_hwnd:
+                break
+            time.sleep(0.2)
 
-            seen_dialog = True
+        if not dialog_hwnd:
+            return "not_found"
+
+        close_deadline = time.time() + max(1, timeout_seconds)
+        while time.time() < close_deadline:
             self._confirm_dialog_once(dialog_hwnd)
             time.sleep(0.2)
             if not self.user32.IsWindow(dialog_hwnd) or not self.user32.IsWindowVisible(dialog_hwnd):
-                return True
+                return "confirmed"
+            next_dialog_hwnd = self._find_top_window_once(
+                pid,
+                class_name="#32770",
+                exclude_hwnd=owner_hwnd,
+            )
+            if next_dialog_hwnd:
+                dialog_hwnd = next_dialog_hwnd
 
-        return False
+        return "timeout"
 
 
 
@@ -610,6 +620,9 @@ class GameTool:
         )
         self.post_load_delay_seconds = max(
             0, parse_int(self.behavior.get("post_load_delay_seconds"), 2)
+        )
+        self.load_confirm_timeout_seconds = max(
+            0, parse_int(self.behavior.get("load_confirm_timeout_seconds"), 3)
         )
         self.launch_settle_seconds = max(
             1, parse_int(self.behavior.get("launch_settle_seconds"), 8)
@@ -2092,6 +2105,18 @@ class GameTool:
                 )
                 self.dialog_controller.click_button(hwnd, load_button_id)
                 print_line(f"[UI] clicked load_button (control_id={load_button_id})")
+                if self.load_confirm_timeout_seconds > 0:
+                    confirm_status = self.dialog_controller.confirm_message_box(
+                        pid,
+                        owner_hwnd=hwnd,
+                        timeout_seconds=self.load_confirm_timeout_seconds,
+                    )
+                    if confirm_status == "confirmed":
+                        print_line("[UI] load_button confirm dialog accepted")
+                    elif confirm_status == "timeout":
+                        raise RuntimeError(
+                            f"加载账号确认弹窗未能在 {self.load_confirm_timeout_seconds} 秒内自动关闭"
+                        )
                 if self.post_load_delay_seconds > 0:
                     print_line(f"[UI] wait after load: {self.post_load_delay_seconds}s")
                     time.sleep(self.post_load_delay_seconds)
