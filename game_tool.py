@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "fail_on_missing_manifest": False,
         "control_poll_seconds": 15,
         "control_error_retry_seconds": 30,
+        "heartbeat_interval_seconds": 30,
         "process_stop_timeout_seconds": 20,
         "window_find_timeout_seconds": 60,
         "launch_ready_seconds": 20,
@@ -102,6 +104,71 @@ CHECKBOX_ID_MAP = {
     "log_detail": "log_detail_checkbox",
 }
 VALID_LAUNCH_BUTTONS = set(BUTTON_ID_MAP.keys()) | {"none"}
+LOCAL_REPORT_SECTION = "LocalReport"
+LOCAL_REPORT_DEFAULTS = {
+    "Enable": "1",
+    "Host": "127.0.0.1",
+    "Port": "18080",
+    "Path": "/api/report",
+    "AgentId": "",
+    "TimeoutMs": "2500",
+}
+
+
+def get_hidden_subprocess_kwargs() -> Dict[str, Any]:
+    if not IS_WINDOWS:
+        return {}
+    kwargs: Dict[str, Any] = {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+    if startupinfo_cls is not None:
+        startupinfo = startupinfo_cls()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
+def run_hidden_subprocess(command: List[str], **kwargs):
+    merged = get_hidden_subprocess_kwargs()
+    merged.update(kwargs)
+    return subprocess.run(command, **merged)
+
+
+def read_text_with_fallback(
+    path: Path,
+    encodings: Optional[List[str]] = None,
+) -> Tuple[str, str]:
+    tried = encodings or ["utf-8-sig", "gbk", "utf-16", "latin-1"]
+    last_error: Optional[Exception] = None
+    for encoding in tried:
+        try:
+            return path.read_text(encoding=encoding), encoding
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"无法读取文本文件: {path}")
+
+
+def replace_ini_section(raw_text: str, section_name: str, section_text: str) -> str:
+    normalized = raw_text.replace("\r\n", "\n")
+    pattern = re.compile(
+        rf"(?ms)^\[{re.escape(section_name)}\]\s*$.*?(?=^\[|\Z)"
+    )
+    replacement = section_text.rstrip() + "\n"
+    if pattern.search(normalized):
+        updated = pattern.sub(replacement, normalized, count=1)
+    else:
+        updated = normalized.rstrip("\n")
+        if updated:
+            updated += "\n\n"
+        updated += replacement
+    return updated.replace("\n", "\r\n")
+
+
 
 
 class RemoteRequestError(RuntimeError):
@@ -529,6 +596,9 @@ class GameTool:
         self.control_error_retry_seconds = max(
             5, parse_int(self.behavior.get("control_error_retry_seconds"), 30)
         )
+        self.heartbeat_interval_seconds = max(
+            5, parse_int(self.behavior.get("heartbeat_interval_seconds"), 30)
+        )
         self.process_stop_timeout_seconds = max(
             5, parse_int(self.behavior.get("process_stop_timeout_seconds"), 20)
         )
@@ -648,6 +718,23 @@ class GameTool:
             "last_remote_has_report": False,
             "last_remote_completed": False,
             "last_seen_stale": False,
+            "last_local_completed": False,
+            "last_local_group": 0,
+            "last_local_role_index": 0,
+            "last_local_status_date": "",
+            "last_local_target_group_end": 0,
+            "last_local_complete_role_index": 0,
+            "last_status_exists": False,
+            "last_status_mtime_epoch": 0,
+            "last_status_signature": "",
+            "last_progress_change_at": "",
+            "last_progress_change_epoch": 0,
+            "last_heartbeat_at": "",
+            "last_heartbeat_epoch": 0,
+            "intent": "none",
+            "intent_reason": "",
+            "intent_at": "",
+            "intent_epoch": 0,
         }
         for key, expected in reset_fields.items():
             if runtime.get(key) != expected:
@@ -714,20 +801,20 @@ class GameTool:
         if isinstance(root, TimeoutError) or winerror == 10060:
             return (
                 "timeout",
-                f"???????? local_report ???????????: {detail}",
+                f"请求 local_report 超时，请检查网络或服务状态: {detail}",
             )
         if isinstance(root, ConnectionRefusedError) or winerror == 10061:
             return (
                 "connection_refused",
-                f"????????? local_report ??????? base_url / ??????: {detail}",
+                f"无法连接 local_report，请检查 base_url / 服务地址: {detail}",
             )
         if isinstance(root, ConnectionResetError) or winerror == 10054:
             return (
                 "connection_reset",
-                f"??????????? local_report ???????????: {detail}",
+                f"连接 local_report 被重置，请检查服务稳定性: {detail}",
             )
         if isinstance(exc, urllib.error.URLError):
-            return ("url_error", f"??????: {detail}")
+            return ("url_error", f"请求失败: {detail}")
         return ("request_failed", detail)
 
     def build_request_error(self, prefix: str, exc: Exception) -> RemoteRequestError:
@@ -747,20 +834,20 @@ class GameTool:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")
             raise RemoteRequestError(
-                f"????: HTTP {exc.code} {detail}", kind=f"http_{exc.code}"
+                f"请求失败: HTTP {exc.code} {detail}", kind=f"http_{exc.code}"
             ) from exc
         except Exception as exc:
-            raise self.build_request_error("????", exc) from exc
+            raise self.build_request_error("请求失败", exc) from exc
 
         try:
             data = json.loads(body)
         except json.JSONDecodeError as exc:
             raise RemoteRequestError(
-                f"???????? JSON: {body[:200]}", kind="invalid_json"
+                f"响应不是合法 JSON: {body[:200]}", kind="invalid_json"
             ) from exc
 
         if not isinstance(data, dict):
-            raise RemoteRequestError("?? JSON ????", kind="invalid_json")
+            raise RemoteRequestError("响应 JSON 不是对象", kind="invalid_json")
         return data
 
     def post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -779,19 +866,19 @@ class GameTool:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "ignore")
             raise RemoteRequestError(
-                f"????: HTTP {exc.code} {detail}", kind=f"http_{exc.code}"
+                f"请求失败: HTTP {exc.code} {detail}", kind=f"http_{exc.code}"
             ) from exc
         except Exception as exc:
-            raise self.build_request_error("????", exc) from exc
+            raise self.build_request_error("请求失败", exc) from exc
 
         try:
             data = json.loads(body_text)
         except json.JSONDecodeError as exc:
             raise RemoteRequestError(
-                f"???????? JSON: {body_text[:200]}", kind="invalid_json"
+                f"响应不是合法 JSON: {body_text[:200]}", kind="invalid_json"
             ) from exc
         if not isinstance(data, dict):
-            raise RemoteRequestError("?? JSON ????", kind="invalid_json")
+            raise RemoteRequestError("响应 JSON 不是对象", kind="invalid_json")
         return data
 
     def fetch_bootstrap(self) -> Dict[str, Any]:
@@ -885,9 +972,17 @@ class GameTool:
         print_line(
             f"Restart Count: {parse_int(runtime.get('restart_count_today'), 0)} / {runtime.get('restart_count_date', '-') or '-'}"
         )
+        print_line(
+            f"Intent: {runtime.get('intent', 'none')} reason={runtime.get('intent_reason', '-') or '-'} at={runtime.get('intent_at', '-') or '-'}"
+        )
+        print_line(f"Last Heartbeat: {runtime.get('last_heartbeat_at', '-') or '-'}")
+        print_line(f"Last Local Evidence: {runtime.get('last_progress_change_at', '-') or '-'}")
         print_line(f"Last Report: {runtime.get('last_seen_report_time', '-')}")
         print_line(
             f"Last Progress: group={runtime.get('last_seen_group', '-')} role_index={runtime.get('last_seen_role_index', '-')}"
+        )
+        print_line(
+            f"Local Completion: completed={bool(runtime.get('last_local_completed', False))} group={runtime.get('last_local_group', '-')} role_index={runtime.get('last_local_role_index', '-')} target_group_end={runtime.get('last_local_target_group_end', '-')} complete_role_index={runtime.get('last_local_complete_role_index', '-')} date={runtime.get('last_local_status_date', '-') or '-'}"
         )
         print_line(
             f"Remote Snapshot: has_report={bool(runtime.get('last_remote_has_report', False))} stale={bool(runtime.get('last_remote_stale', False))} completed={bool(runtime.get('last_remote_completed', False))}"
@@ -910,14 +1005,46 @@ class GameTool:
                 if isinstance(control_doc.get("runtime", {}), dict)
                 else {}
             )
+            supervision = (
+                control_doc.get("supervision", {})
+                if isinstance(control_doc.get("supervision", {}), dict)
+                else {}
+            )
+            result_snapshot = (
+                control_doc.get("result", {})
+                if isinstance(control_doc.get("result", {}), dict)
+                else {}
+            )
+            task = (
+                control_doc.get("task", {})
+                if isinstance(control_doc.get("task", {}), dict)
+                else {}
+            )
+            local_completion = self.get_local_completion_state(task, control)
             print_line(
                 f"Remote Control: run_state={control.get('desired_run_state', '-')} auto_restart={bool(control.get('auto_restart_on_stale', False))} schedule={control.get('schedule_daily_start', '-') or '-'}"
             )
             print_line(
                 f"Remote Report: has_report={bool(remote_runtime.get('has_report', False))} stale={bool(remote_runtime.get('stale', False))} completed={bool(remote_runtime.get('completed', False))} elapsed={remote_runtime.get('elapsed', '-') if remote_runtime.get('elapsed') is not None else '-'}"
             )
+            print_line(
+                f"Local Status.ini: completed={local_completion.get('completed', False)} group={local_completion.get('current_group', 0)} role_index={local_completion.get('role_index', 0)} target_group_end={local_completion.get('target_group_end', 0)} complete_role_index={local_completion.get('complete_role_index', 0)} date={local_completion.get('status_date', '-') or '-'}"
+            )
+            if supervision:
+                print_line(
+                    f"Remote Supervision: {supervision.get('state_label', '-')} detail={supervision.get('detail', '-')}"
+                )
+            if result_snapshot:
+                print_line(
+                    f"Remote Result Status: {result_snapshot.get('state_label', '-')} detail={result_snapshot.get('detail', '-')}"
+                )
+            if self.should_resume_pending_session(runtime, control, task):
+                print_line(
+                    "[HINT] 当前若直接运行 agent，会按今天未完成进度立即续跑；如果今天任务已在其他设备完成，请先执行 `game_tool.exe skip-today`。"
+                )
+
             pending_reason = self.get_pending_restart_reason(
-                runtime, remote_runtime, control
+                runtime, remote_runtime, control, task
             )
             if pending_reason:
                 if self.should_defer_auto_restart_until_schedule(runtime, control):
@@ -975,7 +1102,50 @@ class GameTool:
         self.stop_qiannian(state, reason="manual_stop", clear_session=True)
         runtime = self.get_runtime_state(state)
         runtime["status"] = "stopped"
+        self.set_intent(runtime, "stop_requested", "manual_stop")
         self.save_state(state)
+        self.maybe_post_heartbeat(state, force=True)
+
+    def do_skip_today(self) -> None:
+        self.ensure_dirs()
+        state = self.normalize_state_for_agent(self.load_state())
+        if self.normalize_runtime_for_today(state):
+            self.save_state(state)
+        self.stop_qiannian(state, reason="manual_skip_today", clear_session=True)
+        runtime = self.get_runtime_state(state)
+        runtime["status"] = "stopped"
+        runtime["session_active"] = False
+        self.set_intent(runtime, "skip_today", "manual_skip_today")
+
+        schedule_text = str(runtime.get("schedule_daily_start", "")).strip()
+        if not schedule_text:
+            try:
+                control_doc = self.fetch_control()
+                control = (
+                    control_doc.get("control", {})
+                    if isinstance(control_doc.get("control", {}), dict)
+                    else {}
+                )
+                schedule_text = str(control.get("schedule_daily_start", "")).strip()
+            except Exception as exc:
+                print_line(f"[SKIP] 拉取远端 schedule 失败，继续使用本地状态: {exc}")
+
+        schedule = parse_hhmm(schedule_text)
+        if schedule is not None:
+            next_date = (dt.date.today() + dt.timedelta(days=1)).strftime("%Y-%m-%d")
+            runtime["schedule_daily_start"] = schedule_text
+            runtime["last_schedule_date"] = today_str()
+            runtime["next_schedule_date"] = next_date
+            print_line(
+                f"[SKIP] 已跳过今天，agent 将等待下一次定时启动: date={next_date} schedule={schedule_text}"
+            )
+        else:
+            print_line(
+                "[SKIP] 未找到有效 schedule_daily_start；已阻止今天续跑，但请确认远端定时配置是否正确"
+            )
+
+        self.save_state(state)
+        self.maybe_post_heartbeat(state, force=True)
 
     def write_bootstrap_outputs(
         self, bootstrap: Dict[str, Any], manifest: Optional[Dict[str, Any]]
@@ -1251,7 +1421,7 @@ class GameTool:
 
     def list_process_pids(self, image_name: Optional[str] = None) -> List[int]:
         target = image_name or self.resolve_image_name()
-        result = subprocess.run(
+        result = run_hidden_subprocess(
             ["tasklist", "/FI", f"IMAGENAME eq {target}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
@@ -1336,7 +1506,7 @@ class GameTool:
     def is_pid_running(self, pid: int) -> bool:
         if pid <= 0:
             return False
-        result = subprocess.run(
+        result = run_hidden_subprocess(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
             capture_output=True,
             text=True,
@@ -1362,7 +1532,7 @@ class GameTool:
 
         print_line(f"[CLEANUP] close external processes ({reason}): {unique_pids}")
         for pid in unique_pids:
-            subprocess.run(
+            run_hidden_subprocess(
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
@@ -1420,7 +1590,7 @@ class GameTool:
             return False
 
         print_line(f"[STOP] 关闭进程: {target} -> {pids}")
-        subprocess.run(
+        run_hidden_subprocess(
             ["taskkill", "/IM", target, "/T", "/F"],
             capture_output=True,
             text=True,
@@ -1475,16 +1645,114 @@ class GameTool:
                 return parsed
         return default
 
+    def get_launch_base_dir(self) -> Path:
+        try:
+            exe_path, _image_name, _command = self.build_launch_command(
+                emit_fallback_log=False
+            )
+            return exe_path.parent
+        except Exception:
+            return self.exe_path.parent
+
     def get_status_ini_path(self) -> Path:
-        exe_path, _image_name, _command = self.build_launch_command(
-            emit_fallback_log=False
+        return self.get_launch_base_dir() / "account" / "status.ini"
+
+    def get_global_config_ini_path(self) -> Path:
+        config_dir = self.get_launch_base_dir() / "config"
+        preferred = config_dir / "GlobalConfig.ini"
+        legacy = config_dir / "GlobalCofig.ini"
+        if preferred.exists():
+            return preferred
+        if legacy.exists():
+            return legacy
+        return preferred
+
+    def read_global_local_report_config(self) -> Dict[str, Any]:
+        ini_path = self.get_global_config_ini_path()
+        result = {
+            "path": str(ini_path),
+            "exists": ini_path.exists(),
+            "encoding": "",
+            "section_exists": False,
+            "enable": parse_bool(LOCAL_REPORT_DEFAULTS["Enable"], True),
+            "host": LOCAL_REPORT_DEFAULTS["Host"],
+            "port": parse_int(LOCAL_REPORT_DEFAULTS["Port"], 18080),
+            "path_value": LOCAL_REPORT_DEFAULTS["Path"],
+            "agent_id": LOCAL_REPORT_DEFAULTS["AgentId"],
+            "timeout_ms": parse_int(LOCAL_REPORT_DEFAULTS["TimeoutMs"], 2500),
+        }
+        if not ini_path.exists():
+            return result
+
+        raw_text, encoding = read_text_with_fallback(ini_path)
+        result["encoding"] = encoding
+
+        parser = configparser.ConfigParser()
+        parser.optionxform = str
+        parser.read_string(raw_text)
+        if not parser.has_section(LOCAL_REPORT_SECTION):
+            return result
+
+        result["section_exists"] = True
+        result["enable"] = parse_bool(
+            parser.get(LOCAL_REPORT_SECTION, "Enable", fallback=LOCAL_REPORT_DEFAULTS["Enable"]),
+            True,
         )
-        return exe_path.parent / "account" / "status.ini"
+        result["host"] = str(
+            parser.get(LOCAL_REPORT_SECTION, "Host", fallback=LOCAL_REPORT_DEFAULTS["Host"])
+        ).strip()
+        result["port"] = parse_int(
+            parser.get(LOCAL_REPORT_SECTION, "Port", fallback=LOCAL_REPORT_DEFAULTS["Port"]),
+            18080,
+        )
+        result["path_value"] = str(
+            parser.get(LOCAL_REPORT_SECTION, "Path", fallback=LOCAL_REPORT_DEFAULTS["Path"])
+        ).strip()
+        result["agent_id"] = str(
+            parser.get(LOCAL_REPORT_SECTION, "AgentId", fallback=LOCAL_REPORT_DEFAULTS["AgentId"])
+        ).strip()
+        result["timeout_ms"] = parse_int(
+            parser.get(
+                LOCAL_REPORT_SECTION,
+                "TimeoutMs",
+                fallback=LOCAL_REPORT_DEFAULTS["TimeoutMs"],
+            ),
+            2500,
+        )
+        return result
+
+    def write_global_local_report_config(self, payload: Dict[str, Any]) -> Path:
+        ini_path = self.get_global_config_ini_path()
+        ini_path.parent.mkdir(parents=True, exist_ok=True)
+
+        raw_text = ""
+        encoding = "utf-8-sig"
+        if ini_path.exists():
+            raw_text, encoding = read_text_with_fallback(ini_path)
+            backup_file(ini_path, self.backups_dir)
+
+        values = {
+            "Enable": "1" if parse_bool(payload.get("enable"), True) else "0",
+            "Host": str(payload.get("host", LOCAL_REPORT_DEFAULTS["Host"])).strip(),
+            "Port": str(max(1, parse_int(payload.get("port"), 18080))),
+            "Path": str(payload.get("path_value", LOCAL_REPORT_DEFAULTS["Path"])).strip()
+            or LOCAL_REPORT_DEFAULTS["Path"],
+            "AgentId": str(payload.get("agent_id", "")).strip(),
+            "TimeoutMs": str(max(100, parse_int(payload.get("timeout_ms"), 2500))),
+        }
+        section_lines = [f"[{LOCAL_REPORT_SECTION}]"] + [
+            f"{key}={value}" for key, value in values.items()
+        ]
+        updated_text = replace_ini_section(raw_text, LOCAL_REPORT_SECTION, "\n".join(section_lines))
+        ini_path.write_text(updated_text, encoding=encoding)
+        return ini_path
 
     def read_status_ini_progress(self) -> Dict[str, Any]:
         ini_path = self.get_status_ini_path()
         result = {
             "path": str(ini_path),
+            "exists": ini_path.exists(),
+            "mtime_epoch": 0,
             "group": 0,
             "role_index": 0,
             "last_reset_date": "",
@@ -1492,6 +1760,11 @@ class GameTool:
         }
         if not ini_path.exists():
             return result
+
+        try:
+            result["mtime_epoch"] = int(ini_path.stat().st_mtime)
+        except OSError:
+            result["mtime_epoch"] = 0
 
         parser = configparser.ConfigParser()
         last_error = None
@@ -1524,6 +1797,136 @@ class GameTool:
 
     def read_status_ini_group(self) -> int:
         return parse_int(self.read_status_ini_progress().get("group"), 0)
+
+    def get_local_completion_state(
+        self, task: Dict[str, Any], control: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        progress = self.read_status_ini_progress()
+        current_group = parse_int(progress.get("group"), 0)
+        role_index = parse_int(progress.get("role_index"), 0)
+        target_group_end = max(0, parse_int(task.get("group_end"), 0))
+        complete_role_index = max(
+            1,
+            parse_int(control.get("complete_role_index"), 5),
+        )
+        completed = bool(progress.get("is_today", False)) and target_group_end > 0 and (
+            current_group > target_group_end
+            or (
+                current_group == target_group_end
+                and role_index >= complete_role_index
+            )
+        )
+        return {
+            "completed": completed,
+            "current_group": current_group,
+            "role_index": role_index,
+            "is_today": bool(progress.get("is_today", False)),
+            "status_date": str(progress.get("last_reset_date", "")).strip(),
+            "target_group_end": target_group_end,
+            "complete_role_index": complete_role_index,
+        }
+
+    def set_intent(self, runtime: Dict[str, Any], intent: str, reason: str) -> None:
+        runtime["intent"] = str(intent or "none").strip() or "none"
+        runtime["intent_reason"] = str(reason or "").strip()
+        runtime["intent_at"] = now_str()
+        runtime["intent_epoch"] = int(time.time())
+        runtime["last_heartbeat_epoch"] = 0
+
+    def update_progress_evidence(
+        self, state: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], bool]:
+        runtime = self.get_runtime_state(state)
+        progress = self.read_status_ini_progress()
+        signature = "|".join(
+            [
+                "1" if progress.get("exists", False) else "0",
+                str(parse_int(progress.get("group"), 0)),
+                str(parse_int(progress.get("role_index"), 0)),
+                str(progress.get("last_reset_date", "") or ""),
+                str(parse_int(progress.get("mtime_epoch"), 0)),
+            ]
+        )
+        changed = False
+        if runtime.get("last_status_signature", "") != signature:
+            runtime["last_status_signature"] = signature
+            runtime["last_progress_change_at"] = now_str()
+            runtime["last_progress_change_epoch"] = int(time.time())
+            changed = True
+        current_exists = bool(progress.get("exists", False))
+        current_mtime = parse_int(progress.get("mtime_epoch"), 0)
+        if runtime.get("last_status_exists") != current_exists:
+            runtime["last_status_exists"] = current_exists
+            changed = True
+        if parse_int(runtime.get("last_status_mtime_epoch"), 0) != current_mtime:
+            runtime["last_status_mtime_epoch"] = current_mtime
+            changed = True
+        current_group = parse_int(progress.get("group"), 0)
+        current_role_index = parse_int(progress.get("role_index"), 0)
+        current_status_date = str(progress.get("last_reset_date", "")).strip()
+        if parse_int(runtime.get("last_local_group"), 0) != current_group:
+            runtime["last_local_group"] = current_group
+            changed = True
+        if parse_int(runtime.get("last_local_role_index"), 0) != current_role_index:
+            runtime["last_local_role_index"] = current_role_index
+            changed = True
+        if str(runtime.get("last_local_status_date", "")).strip() != current_status_date:
+            runtime["last_local_status_date"] = current_status_date
+            changed = True
+        return progress, changed
+
+    def build_heartbeat_payload(
+        self, state: Dict[str, Any], progress: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        runtime = self.get_runtime_state(state)
+        progress = progress or self.read_status_ini_progress()
+        process_pids = self.list_process_pids()
+        process_pid = process_pids[0] if process_pids else 0
+        return {
+            "agent_id": self.agent_id,
+            "heartbeat_at": now_str(),
+            "intent": str(runtime.get("intent", "none") or "none"),
+            "intent_reason": str(runtime.get("intent_reason", "") or ""),
+            "intent_at": str(runtime.get("intent_at", "") or ""),
+            "process_exists": bool(process_pid),
+            "process_pid": process_pid,
+            "status_exists": bool(progress.get("exists", False)),
+            "status_group": parse_int(progress.get("group"), 0),
+            "status_role_index": parse_int(progress.get("role_index"), 0),
+            "status_date": str(progress.get("last_reset_date", "") or ""),
+            "status_mtime_epoch": parse_int(progress.get("mtime_epoch"), 0),
+            "last_progress_change_at": str(
+                runtime.get("last_progress_change_at", "") or ""
+            ),
+            "last_restart_at": str(runtime.get("last_restart_time", "") or ""),
+            "restart_count_today": parse_int(runtime.get("restart_count_today"), 0),
+        }
+
+    def maybe_post_heartbeat(
+        self,
+        state: Dict[str, Any],
+        progress: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+    ) -> bool:
+        runtime = self.get_runtime_state(state)
+        now_epoch_value = int(time.time())
+        last_heartbeat_epoch = parse_int(runtime.get("last_heartbeat_epoch"), 0)
+        if (
+            not force
+            and last_heartbeat_epoch > 0
+            and (now_epoch_value - last_heartbeat_epoch) < self.heartbeat_interval_seconds
+        ):
+            return False
+        payload = self.build_heartbeat_payload(state, progress=progress)
+        try:
+            self.post_json("/api/agent/heartbeat", payload)
+        except Exception as exc:
+            print_line(f"[HEARTBEAT] failed to post heartbeat: {exc}")
+            return False
+        runtime["last_heartbeat_at"] = now_str()
+        runtime["last_heartbeat_epoch"] = now_epoch_value
+        self.save_state(state)
+        return True
 
     def resolve_resume_from_status_ini(
         self,
@@ -1768,6 +2171,13 @@ class GameTool:
             self.save_state(state)
             return False
 
+        self.set_intent(
+            runtime,
+            "restart_requested" if count_as_restart else "start_requested",
+            reason,
+        )
+        self.save_state(state)
+
         resume_state = self.resolve_resume_from_status_ini(
             bootstrap, count_as_restart=count_as_restart
         )
@@ -1830,6 +2240,7 @@ class GameTool:
             runtime["last_restart_epoch"] = int(time.time())
             runtime["last_restart_reason"] = reason
         self.save_state(state)
+        self.maybe_post_heartbeat(state, force=True)
         print_line(f"[AGENT] started qiannian, pid={pid}, reason={reason}")
         return True
 
@@ -1953,7 +2364,7 @@ class GameTool:
         )
 
     def should_resume_pending_session(
-        self, runtime: Dict[str, Any], control: Dict[str, Any]
+        self, runtime: Dict[str, Any], control: Dict[str, Any], task: Dict[str, Any]
     ) -> bool:
         if str(control.get("desired_run_state", "run")).strip().lower() == "stop":
             return False
@@ -1964,6 +2375,9 @@ class GameTool:
         if str(runtime.get("status", "")).strip().lower() in {"completed", "stopped"}:
             return False
         if bool(runtime.get("last_remote_completed", False)):
+            return False
+        local_completion = self.get_local_completion_state(task, control)
+        if local_completion.get("completed", False):
             return False
         progress = self.read_status_ini_progress()
         return bool(progress.get("is_today", False)) and parse_int(
@@ -2029,8 +2443,12 @@ class GameTool:
         runtime: Dict[str, Any],
         remote_runtime: Dict[str, Any],
         control: Dict[str, Any],
+        task: Dict[str, Any],
     ) -> str:
         if remote_runtime.get("completed", False):
+            return ""
+        local_completion = self.get_local_completion_state(task, control)
+        if local_completion.get("completed", False):
             return ""
         if self.should_restart_for_missing_first_report(
             runtime, remote_runtime, control
@@ -2094,6 +2512,17 @@ class GameTool:
             if isinstance(control_doc.get("runtime", {}), dict)
             else {}
         )
+        control = (
+            control_doc.get("control", {})
+            if isinstance(control_doc.get("control", {}), dict)
+            else {}
+        )
+        task = (
+            control_doc.get("task", {})
+            if isinstance(control_doc.get("task", {}), dict)
+            else {}
+        )
+        local_completion = self.get_local_completion_state(task, control)
         runtime["last_control_time"] = now_str()
         runtime["last_control_ok"] = True
         runtime["last_control_error"] = ""
@@ -2105,13 +2534,30 @@ class GameTool:
             remote_runtime.get("has_report", False)
         )
         runtime["last_remote_completed"] = bool(remote_runtime.get("completed", False))
+        runtime["last_local_completed"] = bool(local_completion.get("completed", False))
+        runtime["last_local_group"] = parse_int(
+            local_completion.get("current_group"), 0
+        )
+        runtime["last_local_role_index"] = parse_int(
+            local_completion.get("role_index"), 0
+        )
+        runtime["last_local_status_date"] = str(
+            local_completion.get("status_date", "")
+        ).strip()
+        runtime["last_local_target_group_end"] = parse_int(
+            local_completion.get("target_group_end"), 0
+        )
+        runtime["last_local_complete_role_index"] = parse_int(
+            local_completion.get("complete_role_index"), 0
+        )
         if remote_runtime.get("has_report", False):
             runtime["last_seen_report_time"] = remote_runtime.get("server_time", "")
             runtime["last_seen_report_elapsed"] = remote_runtime.get("elapsed")
             runtime["last_seen_group"] = remote_runtime.get("current_group", 0)
             runtime["last_seen_role_index"] = remote_runtime.get("role_index", 0)
-        if remote_runtime.get("completed", False):
+        if remote_runtime.get("completed", False) or local_completion.get("completed", False):
             runtime["status"] = "completed"
+            runtime["session_active"] = False
         self.save_state(state)
         return recovered
 
@@ -2124,7 +2570,7 @@ class GameTool:
             error_kind = str(getattr(exc, "kind", "request_failed")).strip() or "request_failed"
         else:
             error_kind, detail = self.classify_request_exception(exc)
-            error_text = f"????: {detail}" if error_kind != "request_failed" else str(exc)
+            error_text = f"控制拉取失败: {detail}" if error_kind != "request_failed" else str(exc)
         same_error = (
             runtime.get("last_control_error") == error_text
             and runtime.get("last_control_error_kind") == error_kind
@@ -2144,15 +2590,15 @@ class GameTool:
         return streak <= 3 or streak % 10 == 0
 
     def build_control_error_log(self, runtime: Dict[str, Any]) -> str:
-        message = str(runtime.get("last_control_error", "")).strip() or "????"
+        message = str(runtime.get("last_control_error", "")).strip() or "未知错误"
         streak = max(1, parse_int(runtime.get("control_error_streak"), 1))
         if self.is_process_running():
-            local_hint = "?? qiannian ????????????"
+            local_hint = "本地 qiannian 仍在运行，请优先检查 local_report 服务。"
         else:
-            local_hint = "???????????????????"
+            local_hint = "本地未检测到 qiannian 进程，请确认服务和启动链路。"
         return (
-            f"[AGENT] ????????: {message}?{local_hint}?"
-            f"{self.control_error_retry_seconds} ???? (???? {streak} ?)"
+            f"[AGENT] 拉取控制信息失败: {message} {local_hint} "
+            f"{self.control_error_retry_seconds} 秒后重试 (连续 {streak} 次)"
         )
 
     def run_agent_loop(self) -> None:
@@ -2164,13 +2610,17 @@ class GameTool:
                 self.save_state(state)
             runtime = self.get_runtime_state(state)
             self.ensure_restart_counter(runtime)
-            self.save_state(state)
+            progress, progress_changed = self.update_progress_evidence(state)
+            if progress_changed:
+                self.save_state(state)
+            else:
+                self.save_state(state)
 
             try:
                 control_doc = self.fetch_control()
                 control_recovered = self.update_runtime_from_control(state, control_doc)
                 if control_recovered:
-                    print_line("[AGENT] ?????????????????")
+                    print_line("[AGENT] 已恢复从 local_report 拉取控制信息")
             except Exception as exc:
                 runtime = self.mark_control_error(state, exc)
                 if self.should_emit_control_error_log(runtime):
@@ -2180,6 +2630,10 @@ class GameTool:
 
             state = self.normalize_state_for_agent(self.load_state())
             runtime = self.get_runtime_state(state)
+            progress, progress_changed = self.update_progress_evidence(state)
+            if progress_changed:
+                self.save_state(state)
+            self.maybe_post_heartbeat(state, progress=progress)
             control = (
                 control_doc.get("control", {})
                 if isinstance(control_doc.get("control", {}), dict)
@@ -2225,7 +2679,16 @@ class GameTool:
                 time.sleep(self.control_poll_seconds)
                 continue
 
-            if self.should_resume_pending_session(runtime, control):
+            task = (
+                control_doc.get("task", {})
+                if isinstance(control_doc.get("task", {}), dict)
+                else {}
+            )
+
+            if self.should_resume_pending_session(runtime, control, task):
+                print_line(
+                    "[AGENT] 检测到今天存在未完成进度，准备自动续跑；如果这不是预期行为，请先停止 agent 并执行 `game_tool.exe skip-today`。"
+                )
                 self.start_session(
                     state,
                     reason="resume_pending_session",
@@ -2251,7 +2714,7 @@ class GameTool:
 
             if bool(control.get("auto_restart_on_stale", False)):
                 pending_reason = self.get_pending_restart_reason(
-                    runtime, remote_runtime, control
+                    runtime, remote_runtime, control, task
                 )
                 if pending_reason:
                     if self.should_defer_auto_restart_until_schedule(runtime, control):
@@ -2327,6 +2790,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("sync", help="拉取 bootstrap 和 manifest，并写入本地文件")
     subparsers.add_parser("launch", help="直接启动 EXE")
     subparsers.add_parser("stop", help="stop local qiannian process and update runtime")
+    subparsers.add_parser("skip-today", help="跳过今天，不续跑，等待下一次定时启动")
     subparsers.add_parser("run", help="先 sync，再启动 qiannian 并触发按钮")
     subparsers.add_parser("restart", help="使用本地缓存执行 warm restart")
     subparsers.add_parser("reset-runtime", help="clear local agent_runtime for testing")
@@ -2372,6 +2836,9 @@ def main() -> int:
             return 0
         if args.command == "stop":
             tool.do_stop()
+            return 0
+        if args.command == "skip-today":
+            tool.do_skip_today()
             return 0
         if args.command == "run":
             tool.do_run()
