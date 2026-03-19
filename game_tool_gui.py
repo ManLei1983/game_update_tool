@@ -17,6 +17,46 @@ from game_tool_gui_config import ConfigEditorWindow
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
+MOJIBAKE_MARKERS: tuple[str, ...] = ()
+COMMON_CJK_HINTS = set(
+    "的一是了在人有我他这中大来上个们到说国和地也子时道出而要于就下得可你年生自会那后能对着事其里所去行过家学用同控制面板刷新状态启动停止运行配置今天协助任务区服完成失败目标当前结束开始组日期计划本地远端错误重启进度时间跳过后台"
+)
+
+
+def _text_score(value: str) -> int:
+    cjk_count = sum(1 for ch in value if "一" <= ch <= "鿿")
+    common_count = sum(1 for ch in value if ch in COMMON_CJK_HINTS)
+    replacement_count = value.count("�")
+    question_count = value.count("?")
+    return common_count * 4 + cjk_count - replacement_count * 8 - question_count * 4
+
+
+def repair_text(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    candidates = [text]
+    for src, dst in (("gbk", "utf-8"), ("latin-1", "utf-8"), ("cp1252", "utf-8")):
+        try:
+            candidates.append(text.encode(src).decode(dst))
+        except Exception:
+            continue
+    best = max(candidates, key=_text_score)
+    return best if _text_score(best) > _text_score(text) else text
+
+
+def repair_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: repair_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [repair_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [repair_payload(item) for item in value]
+    if isinstance(value, str):
+        return repair_text(value)
+    return value
+
+
 def decode_cli_output(raw: bytes) -> str:
     if not raw:
         return ""
@@ -27,12 +67,16 @@ def decode_cli_output(raw: bytes) -> str:
     for extra in ("gbk", "utf-16", "latin-1"):
         if extra.lower() not in {item.lower() for item in encodings}:
             encodings.append(extra)
+    decoded = ""
     for encoding in encodings:
         try:
-            return raw.decode(encoding)
+            decoded = raw.decode(encoding)
+            break
         except UnicodeDecodeError:
             continue
-    return raw.decode(encodings[0], errors="replace")
+    if not decoded:
+        decoded = raw.decode(encodings[0], errors="replace")
+    return repair_text(decoded)
 
 
 class GameToolGui:
@@ -56,14 +100,14 @@ class GameToolGui:
         core.print_line = lambda message: self._schedule_log(str(message))
         self.config_window: Optional[ConfigEditorWindow] = None
         self._build_ui()
-        self._schedule_log("GUI ready")
+        self._schedule_log("GUI 已就绪")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(200, self.refresh_snapshot)
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=3)
-        self.root.rowconfigure(2, weight=2)
+        self.root.rowconfigure(2, weight=3)
+        self.root.rowconfigure(3, weight=2)
 
         toolbar = ttk.Frame(self.root, padding=(12, 10))
         toolbar.grid(row=0, column=0, sticky="ew")
@@ -91,7 +135,6 @@ class GameToolGui:
         ttk.Button(toolbar, text="手动运行一次", command=self.run_once).grid(
             row=0, column=5, padx=(0, 8)
         )
-
         ttk.Button(toolbar, text="配置面板", command=self.open_config_window).grid(
             row=0, column=6, padx=(0, 8)
         )
@@ -112,8 +155,51 @@ class GameToolGui:
             command=self._on_toggle_auto_refresh,
         ).grid(row=0, column=9, sticky="w")
 
+        assist_bar = ttk.LabelFrame(self.root, text="临时协助任务", padding=(12, 8))
+        assist_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        for idx in range(12):
+            assist_bar.columnconfigure(idx, weight=0)
+        assist_bar.columnconfigure(7, weight=1)
+
+        self.assist_helper_var = tk.StringVar(value="-")
+        self.assist_target_var = tk.StringVar(value="")
+        self.assist_region_var = tk.StringVar(value="")
+        self.assist_start_var = tk.StringVar(value="")
+        self.assist_end_var = tk.StringVar(value="")
+
+        ttk.Label(assist_bar, text="当前 Helper").grid(row=0, column=0, sticky="w")
+        ttk.Label(assist_bar, textvariable=self.assist_helper_var).grid(
+            row=0, column=1, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(assist_bar, text="目标 VM").grid(row=0, column=2, sticky="w")
+        ttk.Entry(assist_bar, textvariable=self.assist_target_var, width=14).grid(
+            row=0, column=3, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(assist_bar, text="区服").grid(row=0, column=4, sticky="w")
+        ttk.Entry(assist_bar, textvariable=self.assist_region_var, width=10).grid(
+            row=0, column=5, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(assist_bar, text="接手开始组").grid(row=0, column=6, sticky="w")
+        ttk.Entry(assist_bar, textvariable=self.assist_start_var, width=8).grid(
+            row=0, column=7, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(assist_bar, text="接手结束组").grid(row=0, column=8, sticky="w")
+        ttk.Entry(assist_bar, textvariable=self.assist_end_var, width=8).grid(
+            row=0, column=9, sticky="w", padx=(0, 12)
+        )
+        ttk.Button(
+            assist_bar,
+            text="保存协助并运行一次",
+            command=self.save_assist_and_run_once,
+        ).grid(row=0, column=10, padx=(0, 8))
+        ttk.Button(
+            assist_bar,
+            text="清除当前协助任务",
+            command=self.clear_current_assist,
+        ).grid(row=0, column=11)
+
         overview = ttk.Frame(self.root, padding=(12, 0, 12, 10))
-        overview.grid(row=1, column=0, sticky="nsew")
+        overview.grid(row=2, column=0, sticky="nsew")
         overview.columnconfigure(0, weight=1)
         overview.columnconfigure(1, weight=1)
         overview.rowconfigure(0, weight=1)
@@ -134,7 +220,9 @@ class GameToolGui:
                 ("Agent ID", "agent_id"),
                 ("Server", "base_url"),
                 ("区服", "region"),
-                ("组范围", "group_range"),
+                ("生效组范围", "group_range"),
+                ("原配置组范围", "profile_group_range"),
+                ("临时协助", "assist_summary"),
                 ("计划时间", "schedule_daily_start"),
                 ("期望状态", "desired_run_state"),
                 ("自动恢复", "auto_restart"),
@@ -159,9 +247,9 @@ class GameToolGui:
         self._build_kv_grid(
             left_bottom,
             [
-                ("远端上报", "remote_has_report"),
-                ("远端超时", "remote_stale"),
-                ("远端完成", "remote_completed"),
+                ("远端结果上报", "remote_has_report"),
+                ("远端结果超时", "remote_stale"),
+                ("远端已完成", "remote_completed"),
                 ("最后上报时间", "remote_server_time"),
                 ("已过秒数", "remote_elapsed"),
                 ("当前组", "remote_group"),
@@ -185,7 +273,7 @@ class GameToolGui:
         )
 
         bottom = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
-        bottom.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        bottom.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 12))
 
         raw_frame = ttk.LabelFrame(bottom, text="原始快照", padding=8)
         log_frame = ttk.LabelFrame(bottom, text="GUI 日志", padding=8)
@@ -213,22 +301,28 @@ class GameToolGui:
             )
             var = tk.StringVar(value="-")
             self.summary_vars[key] = var
-            ttk.Label(parent, textvariable=var, anchor="w", justify=tk.LEFT).grid(
-                row=row_index, column=1, sticky="ew", pady=3
-            )
+            ttk.Label(
+                parent,
+                textvariable=var,
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=460,
+            ).grid(row=row_index, column=1, sticky="ew", pady=3)
 
     def _append_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
+        clean_message = repair_text(message)
         self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.insert(tk.END, f"[{timestamp}] {clean_message}\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
     def _schedule_log(self, message: str) -> None:
-        self.root.after(0, self._append_log, message)
+        self.root.after(0, self._append_log, repair_text(message))
 
     def _set_var(self, key: str, value: Any) -> None:
-        self.summary_vars[key].set("-" if value in (None, "") else str(value))
+        display = "-" if value in (None, "") else repair_text(value)
+        self.summary_vars[key].set(display)
 
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         task = snapshot.get("task", {})
@@ -239,13 +333,25 @@ class GameToolGui:
         progress = snapshot.get("status_progress", {})
         agent_processes = snapshot.get("agent_processes", [])
         control_error = snapshot.get("control_error", "")
+        assist = snapshot.get("assist", {})
+        profile_group_start = task.get("profile_group_start", task.get("group_start", "-"))
+        profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
 
+        self.assist_helper_var.set(repair_text(snapshot.get("agent_id") or "-"))
         self._set_var("agent_id", snapshot.get("agent_id"))
         self._set_var("base_url", snapshot.get("base_url"))
         self._set_var("region", task.get("region", "-"))
         self._set_var(
             "group_range",
-            f"{task.get('group_start', '-') } -> {task.get('group_end', '-')}",
+            f"{task.get('group_start', '-')} -> {task.get('group_end', '-')}",
+        )
+        self._set_var(
+            "profile_group_range",
+            f"{profile_group_start} -> {profile_group_end}",
+        )
+        self._set_var(
+            "assist_summary",
+            assist.get("summary", "") if isinstance(assist, dict) else "-",
         )
         self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
         self._set_var("desired_run_state", control.get("desired_run_state", "-"))
@@ -302,7 +408,7 @@ class GameToolGui:
         self.raw_text.delete("1.0", tk.END)
         self.raw_text.insert(
             tk.END,
-            json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
+            json.dumps(repair_payload(snapshot), ensure_ascii=False, indent=2, default=str),
         )
         self.raw_text.configure(state=tk.DISABLED)
 
@@ -322,6 +428,7 @@ class GameToolGui:
         control: Dict[str, Any] = {}
         task: Dict[str, Any] = {}
         remote_runtime: Dict[str, Any] = {}
+        assist: Dict[str, Any] = {}
         control_error = ""
 
         try:
@@ -344,8 +451,15 @@ class GameToolGui:
                 if isinstance(control_doc.get("runtime", {}), dict)
                 else {}
             )
+            assist = (
+                control_doc.get("assist", {})
+                if isinstance(control_doc.get("assist", {}), dict)
+                else {}
+            )
+            if not assist and isinstance(task.get("assist", {}), dict):
+                assist = dict(task.get("assist", {}))
         except Exception as exc:
-            control_error = str(exc)
+            control_error = repair_text(str(exc))
 
         progress = tool.read_status_ini_progress()
         local_completion = tool.get_local_completion_state(task, control)
@@ -362,6 +476,7 @@ class GameToolGui:
             "base_url": tool.base_url,
             "exe_path": str(tool.exe_path),
             "task": task,
+            "assist": assist,
             "control": control,
             "runtime": dict(runtime),
             "remote_runtime": remote_runtime,
@@ -431,10 +546,10 @@ class GameToolGui:
             try:
                 self._schedule_log(f"{title}: 开始")
                 func()
-                self._schedule_log(f"{title}: 完成")
+                self._schedule_log(f"{title}: 开始")
             except Exception as exc:
                 self._schedule_log(f"{title}: 失败 -> {exc}")
-                self.root.after(0, lambda: messagebox.showerror(title, str(exc)))
+                self.root.after(0, lambda: messagebox.showerror(title, repair_text(str(exc))))
             finally:
                 self.root.after(0, self.refresh_snapshot)
 
@@ -485,7 +600,7 @@ class GameToolGui:
         def action() -> None:
             processes = self._find_agent_processes()
             if processes:
-                raise RuntimeError("检测到 agent 已在运行，先停止旧 agent 再重新启动")
+                raise RuntimeError("检测到 agent 已在运行，请先停止旧 agent 再重新启动")
             cmd = self._build_cli_command("agent")
             subprocess.Popen(
                 cmd,
@@ -542,13 +657,82 @@ class GameToolGui:
             return
         self.config_window = ConfigEditorWindow(self.root, self._schedule_log)
 
+    def _create_tool(self) -> core.GameTool:
+        tool = core.GameTool(core.load_config())
+        tool.ensure_dirs()
+        return tool
+
+    def _require_agent_stopped(self) -> None:
+        if self._find_agent_processes():
+            raise RuntimeError("请先停止后台 Agent，再执行这个操作，避免 agent 与手动 run 并发")
+
+    def save_assist_and_run_once(self) -> None:
+        def action() -> None:
+            self._require_agent_stopped()
+            tool = self._create_tool()
+            helper_agent_id = str(tool.agent_id or "").strip()
+            target_agent_id = self.assist_target_var.get().strip()
+            region = self.assist_region_var.get().strip()
+            delegate_start = core.parse_int(self.assist_start_var.get(), 0)
+            delegate_end = core.parse_int(self.assist_end_var.get(), 0)
+            if not helper_agent_id:
+                raise RuntimeError("当前 game_tool 未配置 agent_id")
+            if not target_agent_id:
+                raise RuntimeError("目标 VM 不能为空")
+            if delegate_start <= 0 or delegate_end <= 0:
+                raise RuntimeError("接手开始组和结束组都必须大于 0")
+            if delegate_end < delegate_start:
+                raise RuntimeError("接手结束组不能小于接手开始组")
+            response = tool.post_json(
+                "/api/agent/assist/assign",
+                {
+                    "helper_agent_id": helper_agent_id,
+                    "target_agent_id": target_agent_id,
+                    "region": region,
+                    "delegate_start": delegate_start,
+                    "delegate_end": delegate_end,
+                },
+            )
+            assist = (
+                response.get("assist", {})
+                if isinstance(response.get("assist", {}), dict)
+                else {}
+            )
+            summary = repair_text(str(assist.get("summary", "") or "临时协助任务已保存"))
+            effective_end = core.parse_int(response.get("target_effective_group_end"), 0)
+            self._schedule_log(f"已保存临时协助任务: {summary}")
+            if effective_end > 0:
+                self._schedule_log(f"目标 VM 今日有效结束组已更新为 {effective_end}")
+            self._run_cli_once("run")
+
+        self._run_background_action("保存协助并运行一次", action)
+
+    def clear_current_assist(self) -> None:
+        def action() -> None:
+            self._require_agent_stopped()
+            tool = self._create_tool()
+            helper_agent_id = str(tool.agent_id or "").strip()
+            if not helper_agent_id:
+                raise RuntimeError("当前 game_tool 未配置 agent_id")
+            response = tool.post_json(
+                "/api/agent/assist/clear",
+                {"helper_agent_id": helper_agent_id},
+            )
+            removed = core.parse_int(response.get("removed"), 0)
+            if removed > 0:
+                self._schedule_log("已清除当前临时协助任务")
+            else:
+                self._schedule_log("当前没有可清除的临时协助任务")
+
+        self._run_background_action("清除当前协助任务", action)
+
     def run_once(self) -> None:
         self._run_background_action("手动运行一次", lambda: self._run_cli_once("run"))
 
     def on_close(self) -> None:
         if messagebox.askyesno(
             "关闭控制面板",
-            "关闭后不会自动停止已在后台运行的 agent。\n是否继续关闭？",
+            "关闭后不会自动停止已经在后台运行的 agent。\n是否继续关闭？",
         ):
             self.root.destroy()
 
