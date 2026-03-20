@@ -1,6 +1,6 @@
 ﻿import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlsplit
 
 import game_tool as core
@@ -32,9 +32,15 @@ def parse_base_url(base_url: str) -> Dict[str, Any]:
 
 
 class ConfigEditorWindow(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, log_func: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        log_func: Callable[[str], None],
+        on_local_config_changed: Optional[Callable[[], None]] = None,
+    ) -> None:
         super().__init__(parent)
         self.log = log_func
+        self.on_local_config_changed = on_local_config_changed
         self.title("game_tool 配置面板")
         self.geometry("980x760")
         self.minsize(900, 700)
@@ -152,6 +158,8 @@ class ConfigEditorWindow(tk.Toplevel):
         self.ready_var.set(str(config["behavior"].get("launch_ready_seconds", 20)))
         self.load_delay_var.set(str(config["behavior"].get("post_load_delay_seconds", 2)))
         self._refresh_compare()
+        if self.on_local_config_changed:
+            self.on_local_config_changed()
         if show_message:
             self.log("已重新读取 game_tool_config.json")
 
@@ -174,6 +182,8 @@ class ConfigEditorWindow(tk.Toplevel):
             tool = self._build_tool_from_form()
             core.save_json_file(core.CONFIG_FILE, tool.config)
             self.log(f"已保存 game_tool 配置 -> {core.CONFIG_FILE}")
+            if self.on_local_config_changed:
+                self.on_local_config_changed()
             self.reload_ini(show_message=False)
             messagebox.showinfo("保存成功", f"已写入:\n{core.CONFIG_FILE}")
         except Exception as exc:

@@ -84,7 +84,7 @@ class GameToolGui:
         self.root = root
         self.root.title("game_tool 控制面板")
         self.root.geometry("1380x960")
-        self.root.minsize(1180, 820)
+        self.root.minsize(1024, 768)
 
         core.create_example_config()
         if not core.CONFIG_FILE.exists():
@@ -95,6 +95,9 @@ class GameToolGui:
         self.agent_launching = False
         self.auto_refresh_var = tk.BooleanVar(value=True)
         self.refresh_interval_var = tk.IntVar(value=5)
+        self.log_line_limit = 400
+        self._overview_canvas: Optional[tk.Canvas] = None
+        self.header_agent_id_var = tk.StringVar(value="-")
 
         self.summary_vars: Dict[str, tk.StringVar] = {}
         core.print_line = lambda message: self._schedule_log(str(message))
@@ -103,21 +106,37 @@ class GameToolGui:
         self._schedule_log("GUI 已就绪")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(200, self.refresh_snapshot)
+        self._bind_mousewheel_for_overview()
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(2, weight=3)
-        self.root.rowconfigure(3, weight=2)
+        self.root.rowconfigure(2, weight=1)
+        self.root.rowconfigure(3, weight=0)
 
-        toolbar = ttk.Frame(self.root, padding=(12, 10))
-        toolbar.grid(row=0, column=0, sticky="ew")
-        for idx in range(12):
+        top_bar = ttk.Frame(self.root, padding=(12, 8))
+        top_bar.grid(row=0, column=0, sticky="ew")
+        top_bar.columnconfigure(0, weight=1)
+        top_bar.columnconfigure(1, weight=0)
+
+        header_info = ttk.Frame(top_bar)
+        header_info.grid(row=0, column=0, sticky="w")
+        ttk.Label(header_info, text="当前 AgentID:").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            header_info,
+            textvariable=self.header_agent_id_var,
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=1, sticky="w", padx=(6, 0))
+
+        toolbar = ttk.Frame(top_bar)
+        toolbar.grid(row=0, column=1, sticky="e")
+        for idx in range(11):
             toolbar.columnconfigure(idx, weight=0)
-        toolbar.columnconfigure(11, weight=1)
 
-        ttk.Button(toolbar, text="刷新状态", command=self.refresh_snapshot).grid(
-            row=0, column=0, padx=(0, 8)
-        )
+        ttk.Button(
+            toolbar,
+            text="刷新状态",
+            command=lambda: self.refresh_snapshot(log_success=True),
+        ).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(toolbar, text="启动 Agent", command=self.start_agent).grid(
             row=0, column=1, padx=(0, 8)
         )
@@ -141,7 +160,6 @@ class GameToolGui:
         ttk.Button(toolbar, text="配置面板", command=self.open_config_window).grid(
             row=0, column=7, padx=(0, 8)
         )
-
         ttk.Checkbutton(
             toolbar,
             text="自动刷新",
@@ -158,10 +176,12 @@ class GameToolGui:
             command=self._on_toggle_auto_refresh,
         ).grid(row=0, column=10, sticky="w")
 
-        quick_bar = ttk.LabelFrame(self.root, text="本机快捷入口", padding=(12, 8))
-        quick_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-        for idx in range(6):
-            quick_bar.columnconfigure(idx, weight=0)
+        quick_bar = ttk.LabelFrame(
+            self.root,
+            text="当前协助 / 本机快捷入口",
+            padding=(10, 4),
+        )
+        quick_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
         quick_bar.columnconfigure(1, weight=1)
 
         self.assist_status_var = tk.StringVar(value="当前未接到临时协助任务")
@@ -173,116 +193,157 @@ class GameToolGui:
             quick_bar,
             textvariable=self.assist_status_var,
             justify=tk.LEFT,
-            wraplength=980,
-        ).grid(row=0, column=1, columnspan=5, sticky="ew")
-        ttk.Label(
-            quick_bar,
-            text="协助任务请在 local_report console 配置；本机只负责同步和执行。",
-        ).grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 8))
+            wraplength=1160,
+        ).grid(row=0, column=1, sticky="ew")
 
+        ttk.Label(quick_bar, text="快捷操作").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(4, 0)
+        )
+        quick_actions = ttk.Frame(quick_bar)
+        quick_actions.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        for idx in range(6):
+            quick_actions.columnconfigure(idx, weight=0)
         ttk.Button(
-            quick_bar,
-            text="打开 game_tool 配置",
+            quick_actions,
+            text="game_tool 配置",
             command=self.open_game_tool_config,
-        ).grid(row=2, column=0, padx=(0, 8), pady=(0, 4), sticky="w")
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
         ttk.Button(
-            quick_bar,
-            text="打开 GlobalConfig.ini",
+            quick_actions,
+            text="GlobalConfig.ini",
             command=self.open_global_config_ini,
-        ).grid(row=2, column=1, padx=(0, 8), pady=(0, 4), sticky="w")
+        ).grid(row=0, column=1, padx=(0, 8), sticky="w")
         ttk.Button(
-            quick_bar,
-            text="打开 state.json",
+            quick_actions,
+            text="state.json",
             command=self.open_state_file,
-        ).grid(row=2, column=2, padx=(0, 8), pady=(0, 4), sticky="w")
+        ).grid(row=0, column=2, padx=(0, 8), sticky="w")
         ttk.Button(
-            quick_bar,
-            text="打开 bootstrap.json",
+            quick_actions,
+            text="bootstrap.json",
             command=self.open_bootstrap_file,
-        ).grid(row=3, column=0, padx=(0, 8), sticky="w")
+        ).grid(row=0, column=3, padx=(0, 8), sticky="w")
         ttk.Button(
-            quick_bar,
-            text="打开 QianNian 目录",
+            quick_actions,
+            text="QianNian 目录",
             command=self.open_qiannian_dir,
-        ).grid(row=3, column=1, padx=(0, 8), sticky="w")
+        ).grid(row=0, column=4, padx=(0, 8), sticky="w")
         ttk.Button(
-            quick_bar,
-            text="打开 account 目录",
+            quick_actions,
+            text="account 目录",
             command=self.open_account_dir,
-        ).grid(row=3, column=2, padx=(0, 8), sticky="w")
+        ).grid(row=0, column=5, sticky="w")
 
-        overview = ttk.Frame(self.root, padding=(12, 0, 12, 10))
-        overview.grid(row=2, column=0, sticky="nsew")
+        overview_host = ttk.Frame(self.root, padding=(12, 0, 12, 8))
+        overview_host.grid(row=2, column=0, sticky="nsew")
+        overview_host.columnconfigure(0, weight=1)
+        overview_host.rowconfigure(0, weight=1)
+
+        overview_canvas = tk.Canvas(overview_host, highlightthickness=0, borderwidth=0)
+        self._overview_canvas = overview_canvas
+        overview_canvas.grid(row=0, column=0, sticky="nsew")
+        overview_scrollbar = ttk.Scrollbar(
+            overview_host,
+            orient=tk.VERTICAL,
+            command=overview_canvas.yview,
+        )
+        overview_scrollbar.grid(row=0, column=1, sticky="ns")
+        overview_canvas.configure(yscrollcommand=overview_scrollbar.set)
+
+        overview = ttk.Frame(overview_canvas)
+        overview_window = overview_canvas.create_window(
+            (0, 0), window=overview, anchor="nw"
+        )
+        overview.bind(
+            "<Configure>",
+            lambda event: overview_canvas.configure(
+                scrollregion=overview_canvas.bbox("all")
+            ),
+        )
+        overview_canvas.bind(
+            "<Configure>",
+            lambda event: overview_canvas.itemconfigure(
+                overview_window, width=event.width
+            ),
+        )
+
         overview.columnconfigure(0, weight=1)
         overview.columnconfigure(1, weight=1)
         overview.rowconfigure(0, weight=1)
         overview.rowconfigure(1, weight=1)
 
-        left_top = ttk.LabelFrame(overview, text="任务配置", padding=10)
-        left_top.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        right_top = ttk.LabelFrame(overview, text="本地状态", padding=10)
-        right_top.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
-        left_bottom = ttk.LabelFrame(overview, text="远端状态", padding=10)
-        left_bottom.grid(row=1, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
-        right_bottom = ttk.LabelFrame(overview, text="执行判断", padding=10)
-        right_bottom.grid(row=1, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        left_top = ttk.LabelFrame(overview, text="任务配置", padding=6)
+        left_top.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        right_top = ttk.LabelFrame(overview, text="本地状态", padding=6)
+        right_top.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        left_bottom = ttk.LabelFrame(overview, text="远端状态", padding=6)
+        left_bottom.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(6, 0))
+        right_bottom = ttk.LabelFrame(overview, text="执行判断", padding=6)
+        right_bottom.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(6, 0))
 
         self._build_kv_grid(
             left_top,
             [
                 ("Agent ID", "agent_id"),
-                ("Server", "base_url"),
                 ("区服", "region"),
-                ("生效组范围", "group_range"),
-                ("原配置组范围", "profile_group_range"),
-                ("临时协助", "assist_summary"),
+                ("生效范围", "group_range"),
+                ("原配置范围", "profile_group_range"),
                 ("计划时间", "schedule_daily_start"),
                 ("期望状态", "desired_run_state"),
                 ("自动恢复", "auto_restart"),
+                ("Server", "base_url"),
+                ("临时协助", "assist_summary"),
                 ("启动 EXE", "exe_path"),
             ],
+            wraplength=300,
+            wrap_max_by_key={"exe_path": 280},
         )
         self._build_kv_grid(
             right_top,
             [
                 ("本地状态", "local_status"),
                 ("Session Active", "session_active"),
-                ("下次计划日期", "next_schedule_date"),
-                ("最近启动时间", "last_launch_time"),
+                ("下次计划", "next_schedule_date"),
+                ("最近启动", "last_launch_time"),
                 ("启动原因", "last_launch_reason"),
-                ("最近停止时间", "last_stop_time"),
+                ("最近停止", "last_stop_time"),
                 ("停止原因", "last_stop_reason"),
-                ("Agent 进程", "agent_process"),
                 ("千年进程", "qiannian_running"),
+                ("状态说明", "local_status_detail"),
+                ("Agent进程", "agent_process"),
                 ("status.ini", "status_ini"),
             ],
+            wraplength=380,
         )
         self._build_kv_grid(
             left_bottom,
             [
-                ("远端结果上报", "remote_has_report"),
-                ("远端结果超时", "remote_stale"),
-                ("远端已完成", "remote_completed"),
-                ("最后上报时间", "remote_server_time"),
+                ("远端上报", "remote_has_report"),
+                ("远端超时", "remote_stale"),
+                ("远端完成", "remote_completed"),
+                ("最后上报", "remote_server_time"),
                 ("已过秒数", "remote_elapsed"),
                 ("当前组", "remote_group"),
                 ("角色索引", "remote_role_index"),
-                ("事件", "remote_event"),
-                ("控制拉取错误", "control_error"),
+                ("远端事件", "remote_event"),
+                ("拉取错误", "control_error"),
             ],
+            wraplength=380,
+            wrap_max_by_key={"control_error": 300},
         )
         self._build_kv_grid(
             right_bottom,
             [
-                ("本地完成判断", "local_completed"),
+                ("本地完成", "local_completed"),
                 ("目标结束组", "local_target_group_end"),
-                ("完成角色阈值", "local_complete_role_index"),
-                ("今天是否续跑", "should_resume_today"),
-                ("待触发重启原因", "pending_restart_reason"),
+                ("完成阈值", "local_complete_role_index"),
+                ("今天续跑", "should_resume_today"),
                 ("重启计数", "restart_counter"),
-                ("最近进度", "last_progress"),
                 ("本地日期", "status_date"),
+                ("最近进度", "last_progress"),
+                ("待重启原因", "pending_restart_reason"),
             ],
+            wraplength=380,
         )
 
         bottom = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -298,35 +359,235 @@ class GameToolGui:
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
-        self.raw_text = scrolledtext.ScrolledText(raw_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.raw_text = scrolledtext.ScrolledText(
+            raw_frame, wrap=tk.WORD, font=("Consolas", 10), height=8
+        )
         self.raw_text.grid(row=0, column=0, sticky="nsew")
         self.raw_text.configure(state=tk.DISABLED)
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, wrap=tk.WORD, font=("Consolas", 10), height=8
+        )
         self.log_text.grid(row=0, column=0, sticky="nsew")
         self.log_text.configure(state=tk.DISABLED)
 
-    def _build_kv_grid(self, parent: ttk.LabelFrame, rows: List[tuple[str, str]]) -> None:
-        parent.columnconfigure(1, weight=1)
-        for row_index, (label_text, key) in enumerate(rows):
+    def _refresh_header_agent_id(self, value: Any = None) -> None:
+        if value in (None, ""):
+            try:
+                config = core.load_config()
+                value = (
+                    config.get("server", {}).get("agent_id", "")
+                    if isinstance(config, dict)
+                    else ""
+                )
+            except Exception:
+                value = ""
+        display = repair_text(str(value or "-").strip() or "-")
+        self.header_agent_id_var.set(display)
+
+    def _on_local_config_changed(self) -> None:
+        self._refresh_header_agent_id()
+        self.refresh_snapshot()
+
+    def _build_kv_grid(
+        self,
+        parent: ttk.LabelFrame,
+        rows: List[tuple[str, str]],
+        columns: int = 1,
+        wraplength: Optional[int] = None,
+        full_width_keys: Optional[set[str]] = None,
+        full_width_wraplength: Optional[int] = None,
+        wrap_max_by_key: Optional[Dict[str, int]] = None,
+    ) -> None:
+        columns = max(1, int(columns or 1))
+        full_width_keys = set(full_width_keys or set())
+        wrap_max_by_key = dict(wrap_max_by_key or {})
+        total_columns = columns * 2
+        for column_group in range(columns):
+            label_column = column_group * 2
+            value_column = label_column + 1
+            parent.columnconfigure(label_column, weight=0)
+            parent.columnconfigure(value_column, weight=1)
+
+        effective_wraplength = (
+            wraplength if wraplength is not None else (460 if columns == 1 else 220)
+        )
+        effective_full_width_wraplength = (
+            full_width_wraplength
+            if full_width_wraplength is not None
+            else max(520, effective_wraplength * max(2, columns))
+        )
+
+        current_row = 0
+        current_slot = 0
+        for label_text, key in rows:
+            is_full_width = columns > 1 and key in full_width_keys
+            if is_full_width and current_slot:
+                current_row += 1
+                current_slot = 0
+
+            if is_full_width:
+                ttk.Label(parent, text=label_text).grid(
+                    row=current_row,
+                    column=0,
+                    sticky="nw",
+                    padx=(0, 12),
+                    pady=2,
+                )
+                var = tk.StringVar(value="-")
+                self.summary_vars[key] = var
+                value_label = ttk.Label(
+                    parent,
+                    textvariable=var,
+                    anchor="w",
+                    justify=tk.LEFT,
+                    wraplength=effective_full_width_wraplength,
+                )
+                value_label.grid(
+                    row=current_row,
+                    column=1,
+                    columnspan=total_columns - 1,
+                    sticky="ew",
+                    pady=2,
+                )
+                self._bind_dynamic_wrap(
+                    value_label,
+                    fallback=effective_full_width_wraplength,
+                    max_width=wrap_max_by_key.get(key),
+                )
+                current_row += 1
+                current_slot = 0
+                continue
+
+            label_column = current_slot * 2
+            value_column = label_column + 1
+            label_padx = (0, 12) if current_slot == 0 else (18, 12)
+            value_padx = (0, 6) if current_slot == 0 else (0, 0)
             ttk.Label(parent, text=label_text).grid(
-                row=row_index, column=0, sticky="nw", padx=(0, 12), pady=3
+                row=current_row,
+                column=label_column,
+                sticky="nw",
+                padx=label_padx,
+                pady=2,
             )
             var = tk.StringVar(value="-")
             self.summary_vars[key] = var
-            ttk.Label(
+            value_label = ttk.Label(
                 parent,
                 textvariable=var,
                 anchor="w",
                 justify=tk.LEFT,
-                wraplength=460,
-            ).grid(row=row_index, column=1, sticky="ew", pady=3)
+                wraplength=effective_wraplength,
+            )
+            value_label.grid(
+                row=current_row,
+                column=value_column,
+                sticky="ew",
+                padx=value_padx,
+                pady=2,
+            )
+            self._bind_dynamic_wrap(
+                value_label,
+                fallback=effective_wraplength,
+                max_width=wrap_max_by_key.get(key),
+            )
+            current_slot += 1
+            if current_slot >= columns:
+                current_row += 1
+                current_slot = 0
+
+    def _bind_dynamic_wrap(
+        self,
+        widget: ttk.Label,
+        fallback: int,
+        max_width: Optional[int] = None,
+    ) -> None:
+        widget.configure(wraplength=fallback)
+        widget.bind(
+            "<Configure>",
+            lambda event, target=widget, default_wrap=fallback, max_wrap=max_width: self._update_dynamic_wrap(
+                target,
+                default_wrap,
+                max_wrap,
+            ),
+            add="+",
+        )
+
+    def _update_dynamic_wrap(
+        self,
+        widget: ttk.Label,
+        fallback: int,
+        max_width: Optional[int] = None,
+    ) -> None:
+        try:
+            current_width = int(widget.winfo_width())
+        except Exception:
+            current_width = 0
+        target_wrap = max(120, current_width - 8) if current_width > 0 else fallback
+        if max_width is not None and max_width > 0:
+            target_wrap = min(target_wrap, max_width)
+        try:
+            existing = int(float(widget.cget("wraplength")))
+        except Exception:
+            existing = 0
+        if abs(existing - target_wrap) > 4:
+            widget.configure(wraplength=target_wrap)
+
+    def _bind_mousewheel_for_overview(self) -> None:
+        self.root.bind_all("<MouseWheel>", self._on_overview_mousewheel, add="+")
+        self.root.bind_all(
+            "<Button-4>",
+            lambda event: self._on_overview_mousewheel(event, forced_delta=-1),
+            add="+",
+        )
+        self.root.bind_all(
+            "<Button-5>",
+            lambda event: self._on_overview_mousewheel(event, forced_delta=1),
+            add="+",
+        )
+
+    def _is_overview_widget(self, widget: Any) -> bool:
+        canvas = self._overview_canvas
+        while widget is not None:
+            if widget is canvas:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _on_overview_mousewheel(
+        self,
+        event: Any,
+        forced_delta: Optional[int] = None,
+    ) -> None:
+        canvas = self._overview_canvas
+        if not canvas or not canvas.winfo_exists():
+            return
+        pointer_widget = self.root.winfo_containing(
+            self.root.winfo_pointerx(),
+            self.root.winfo_pointery(),
+        )
+        if not self._is_overview_widget(pointer_widget):
+            return
+        delta = forced_delta
+        if delta is None:
+            raw_delta = getattr(event, "delta", 0)
+            if raw_delta == 0:
+                return
+            delta = -1 if raw_delta > 0 else 1
+        canvas.yview_scroll(int(delta), "units")
 
     def _append_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         clean_message = repair_text(message)
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, f"[{timestamp}] {clean_message}\n")
+        try:
+            line_count = int(float(self.log_text.index("end-1c").split(".")[0]))
+        except Exception:
+            line_count = 0
+        if line_count > self.log_line_limit:
+            overflow = line_count - self.log_line_limit
+            self.log_text.delete("1.0", f"{overflow + 1}.0")
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
@@ -347,16 +608,22 @@ class GameToolGui:
         agent_processes = snapshot.get("agent_processes", [])
         control_error = snapshot.get("control_error", "")
         assist = snapshot.get("assist", {})
-        profile_group_start = task.get("profile_group_start", task.get("group_start", "-"))
+        profile_group_start = task.get(
+            "profile_group_start", task.get("group_start", "-")
+        )
         profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
 
-        assist_summary = (
-            assist.get("summary", "") if isinstance(assist, dict) else ""
-        )
+        assist_summary = assist.get("summary", "") if isinstance(assist, dict) else ""
         self.assist_status_var.set(
-            repair_text(str(assist_summary or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1"))
+            repair_text(
+                str(
+                    assist_summary
+                    or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1"
+                )
+            )
         )
         self._set_var("agent_id", snapshot.get("agent_id"))
+        self._refresh_header_agent_id(snapshot.get("agent_id"))
         self._set_var("base_url", snapshot.get("base_url"))
         self._set_var("region", task.get("region", "-"))
         self._set_var(
@@ -369,7 +636,8 @@ class GameToolGui:
         )
         self._set_var(
             "assist_summary",
-            assist_summary or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1",
+            assist_summary
+            or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1",
         )
         self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
         self._set_var("desired_run_state", control.get("desired_run_state", "-"))
@@ -377,6 +645,7 @@ class GameToolGui:
         self._set_var("exe_path", snapshot.get("exe_path"))
 
         self._set_var("local_status", runtime.get("status", "-"))
+        self._set_var("local_status_detail", snapshot.get("local_status_detail", "-"))
         self._set_var("session_active", bool(runtime.get("session_active", False)))
         self._set_var("next_schedule_date", runtime.get("next_schedule_date", "-"))
         self._set_var("last_launch_time", runtime.get("last_launch_time", "-"))
@@ -385,9 +654,11 @@ class GameToolGui:
         self._set_var("last_stop_reason", runtime.get("last_stop_reason", "-"))
         self._set_var(
             "agent_process",
-            f"running ({', '.join(str(item.get('ProcessId')) for item in agent_processes)})"
-            if agent_processes
-            else "not running",
+            (
+                f"running ({', '.join(str(item.get('ProcessId')) for item in agent_processes)})"
+                if agent_processes
+                else "not running"
+            ),
         )
         self._set_var("qiannian_running", snapshot.get("qiannian_running", False))
         self._set_var(
@@ -411,7 +682,9 @@ class GameToolGui:
             "local_complete_role_index", local.get("complete_role_index", "-")
         )
         self._set_var("should_resume_today", snapshot.get("should_resume_today", False))
-        self._set_var("pending_restart_reason", snapshot.get("pending_restart_reason", "-"))
+        self._set_var(
+            "pending_restart_reason", snapshot.get("pending_restart_reason", "-")
+        )
         self._set_var(
             "restart_counter",
             f"{runtime.get('restart_count_today', 0)} / {runtime.get('restart_count_date', '-') or '-'}",
@@ -426,7 +699,9 @@ class GameToolGui:
         self.raw_text.delete("1.0", tk.END)
         self.raw_text.insert(
             tk.END,
-            json.dumps(repair_payload(snapshot), ensure_ascii=False, indent=2, default=str),
+            json.dumps(
+                repair_payload(snapshot), ensure_ascii=False, indent=2, default=str
+            ),
         )
         self.raw_text.configure(state=tk.DISABLED)
 
@@ -481,10 +756,22 @@ class GameToolGui:
 
         progress = tool.read_status_ini_progress()
         local_completion = tool.get_local_completion_state(task, control)
+        qiannian_running = tool.is_process_running()
+        local_status_detail = tool.describe_local_status(
+            runtime,
+            control,
+            task,
+            remote_runtime=remote_runtime,
+            local_completion=local_completion,
+            progress=progress,
+            qiannian_running=qiannian_running,
+        )
         should_resume_today = False
         pending_restart_reason = ""
         if task or control:
-            should_resume_today = tool.should_resume_pending_session(runtime, control, task)
+            should_resume_today = tool.should_resume_pending_session(
+                runtime, control, task
+            )
             pending_restart_reason = tool.get_pending_restart_reason(
                 runtime, remote_runtime, control, task
             )
@@ -500,14 +787,15 @@ class GameToolGui:
             "remote_runtime": remote_runtime,
             "status_progress": progress,
             "local_completion": local_completion,
+            "local_status_detail": local_status_detail,
             "should_resume_today": should_resume_today,
             "pending_restart_reason": pending_restart_reason,
             "control_error": control_error,
             "agent_processes": self._find_agent_processes(),
-            "qiannian_running": tool.is_process_running(),
+            "qiannian_running": qiannian_running,
         }
 
-    def refresh_snapshot(self) -> None:
+    def refresh_snapshot(self, log_success: bool = False) -> None:
         if self.refresh_running:
             return
         self.refresh_running = True
@@ -516,7 +804,8 @@ class GameToolGui:
             try:
                 snapshot = self._build_snapshot()
                 self.root.after(0, self._render_snapshot, snapshot)
-                self._schedule_log("状态已刷新")
+                if log_success:
+                    self._schedule_log("状态已刷新")
             except Exception as exc:
                 self._schedule_log(f"刷新失败: {exc}")
             finally:
@@ -550,7 +839,9 @@ class GameToolGui:
             creationflags=CREATE_NO_WINDOW,
             check=False,
         )
-        output = decode_cli_output((completed.stdout or b"") + (completed.stderr or b""))
+        output = decode_cli_output(
+            (completed.stdout or b"") + (completed.stderr or b"")
+        )
         output = output.strip()
         if output:
             for line in output.splitlines():
@@ -567,7 +858,9 @@ class GameToolGui:
                 self._schedule_log(f"{title}: 完成")
             except Exception as exc:
                 self._schedule_log(f"{title}: 失败 -> {exc}")
-                self.root.after(0, lambda: messagebox.showerror(title, repair_text(str(exc))))
+                self.root.after(
+                    0, lambda: messagebox.showerror(title, repair_text(str(exc)))
+                )
             finally:
                 self.root.after(0, self.refresh_snapshot)
 
@@ -578,7 +871,10 @@ class GameToolGui:
         cli_py = core.SCRIPT_DIR / "game_tool.py"
         if getattr(sys, "frozen", False) and cli_exe.exists():
             return [str(cli_exe), subcommand]
-        if cli_exe.exists() and core.SCRIPT_DIR != Path(sys.executable).resolve().parent:
+        if (
+            cli_exe.exists()
+            and core.SCRIPT_DIR != Path(sys.executable).resolve().parent
+        ):
             return [str(cli_exe), subcommand]
         return [sys.executable, str(cli_py), subcommand]
 
@@ -643,7 +939,9 @@ class GameToolGui:
             time.sleep(0.5)
             processes = self._find_agent_processes()
             if processes:
-                raise RuntimeError("skip-today 执行后检测到 agent 已在运行，请先停止旧 agent")
+                raise RuntimeError(
+                    "skip-today 执行后检测到 agent 已在运行，请先停止旧 agent"
+                )
             cmd = self._build_cli_command("agent")
             subprocess.Popen(
                 cmd,
@@ -673,7 +971,11 @@ class GameToolGui:
             self.config_window.focus_force()
             self.config_window.lift()
             return
-        self.config_window = ConfigEditorWindow(self.root, self._schedule_log)
+        self.config_window = ConfigEditorWindow(
+            self.root,
+            self._schedule_log,
+            on_local_config_changed=self._on_local_config_changed,
+        )
 
     def _create_tool(self) -> core.GameTool:
         tool = core.GameTool(core.load_config())
