@@ -302,34 +302,46 @@ class GameToolGui:
             right_top,
             [
                 ("本地状态", "local_status"),
+                ("状态说明", "local_status_detail"),
                 ("Session Active", "session_active"),
+                ("千年进程", "qiannian_running"),
+                ("本地心跳", "last_heartbeat_time"),
+                ("本地证据", "local_progress_evidence"),
+                ("status.ini", "status_ini"),
                 ("下次计划", "next_schedule_date"),
                 ("最近启动", "last_launch_time"),
                 ("启动原因", "last_launch_reason"),
                 ("最近停止", "last_stop_time"),
                 ("停止原因", "last_stop_reason"),
-                ("千年进程", "qiannian_running"),
-                ("状态说明", "local_status_detail"),
                 ("Agent进程", "agent_process"),
-                ("status.ini", "status_ini"),
             ],
             wraplength=380,
+            wrap_max_by_key={
+                "local_status_detail": 320,
+                "local_progress_evidence": 320,
+            },
         )
         self._build_kv_grid(
             left_bottom,
             [
-                ("远端上报", "remote_has_report"),
-                ("远端超时", "remote_stale"),
-                ("远端完成", "remote_completed"),
-                ("最后上报", "remote_server_time"),
-                ("已过秒数", "remote_elapsed"),
-                ("当前组", "remote_group"),
-                ("角色索引", "remote_role_index"),
+                ("监督状态", "remote_supervision_state"),
+                ("监督说明", "remote_supervision_detail"),
+                ("结果状态", "remote_result_state"),
+                ("结果说明", "remote_result_detail"),
+                ("远端心跳", "remote_heartbeat"),
+                ("心跳证据", "remote_heartbeat_progress"),
+                ("结果进度", "remote_result_progress"),
                 ("远端事件", "remote_event"),
                 ("拉取错误", "control_error"),
             ],
             wraplength=380,
-            wrap_max_by_key={"control_error": 300},
+            wrap_max_by_key={
+                "remote_supervision_detail": 320,
+                "remote_result_detail": 320,
+                "remote_heartbeat_progress": 320,
+                "remote_result_progress": 320,
+                "control_error": 300,
+            },
         )
         self._build_kv_grid(
             right_bottom,
@@ -342,8 +354,14 @@ class GameToolGui:
                 ("本地日期", "status_date"),
                 ("最近进度", "last_progress"),
                 ("待重启原因", "pending_restart_reason"),
+                ("链路对比", "evidence_comparison"),
+                ("处理建议", "evidence_hint"),
             ],
             wraplength=380,
+            wrap_max_by_key={
+                "evidence_comparison": 320,
+                "evidence_hint": 320,
+            },
         )
 
         bottom = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -598,11 +616,101 @@ class GameToolGui:
         display = "-" if value in (None, "") else repair_text(value)
         self.summary_vars[key].set(display)
 
+    def _format_remote_state(self, payload: Dict[str, Any]) -> str:
+        if not isinstance(payload, dict) or not payload:
+            return "-"
+        label = str(payload.get("state_label", "") or "").strip()
+        code = str(payload.get("state_code", "") or "").strip()
+        if label and code:
+            return f"{label} ({code})"
+        return label or code or "-"
+
+    def _build_evidence_insight(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        remote_runtime = snapshot.get("remote_runtime", {})
+        remote_supervision = snapshot.get("remote_supervision", {})
+        remote_result = snapshot.get("remote_result", {})
+        remote_heartbeat = snapshot.get("remote_heartbeat", {})
+        progress = snapshot.get("status_progress", {})
+        control_error = str(snapshot.get("control_error", "") or "").strip()
+        qiannian_running = bool(snapshot.get("qiannian_running", False))
+
+        supervision_label = (
+            str(remote_supervision.get("state_label", "") or "-").strip() or "-"
+        )
+        supervision_code = str(remote_supervision.get("state_code", "") or "").strip()
+        result_label = str(remote_result.get("state_label", "") or "-").strip() or "-"
+        result_code = str(remote_result.get("state_code", "") or "").strip()
+
+        local_group = core.parse_int(progress.get("group"), 0)
+        remote_group = core.parse_int(
+            remote_result.get("current_group", remote_runtime.get("current_group", 0)),
+            0,
+        )
+        heartbeat_group = core.parse_int(remote_heartbeat.get("status_group"), 0)
+
+        comparison_parts: List[str] = []
+        if supervision_label != "-" or result_label != "-":
+            comparison_parts.append(
+                f"监督={supervision_label} / 结果={result_label}"
+            )
+        if heartbeat_group > 0 or remote_group > 0 or local_group > 0:
+            comparison_parts.append(
+                f"heartbeat={heartbeat_group or '-'} / report={remote_group or '-'} / 本地status={local_group or '-'}"
+            )
+
+        hints: List[str] = []
+        if control_error:
+            if qiannian_running:
+                hints.append(
+                    "local_report 当前不可达，但本地千年仍在运行；优先检查 report 服务，不要急着重启。"
+                )
+            else:
+                hints.append(
+                    "local_report 当前不可达，且本地未检测到千年进程；先恢复 report 服务，再看启动链路。"
+                )
+        if supervision_code in {"suspected_stuck", "startup_failed"} and result_code == "fresh":
+            hints.append(
+                "结果链路仍在刷新，但监督链路已落后；优先检查 game_tool agent 是否常驻、heartbeat 是否持续上报。"
+            )
+        if remote_group > 0 and local_group > 0:
+            if remote_group > local_group:
+                hints.append(
+                    f"report 结果已到 group={remote_group}，本地 status.ini 仍是 {local_group}；更像是本地证据刷新落后。"
+                )
+            elif local_group > remote_group:
+                hints.append(
+                    f"本地 status.ini 已到 group={local_group}，report 结果仍是 {remote_group}；通常表示当前组尚未完成，属于正常中间态。"
+                )
+        if heartbeat_group > 0 and remote_group > 0 and heartbeat_group != remote_group:
+            if remote_group > heartbeat_group and result_code == "fresh":
+                hints.append(
+                    f"report 侧 heartbeat 仍停在 group={heartbeat_group}，但结果上报已到 group={remote_group}；不要仅凭监督状态判死。"
+                )
+            elif heartbeat_group > remote_group:
+                hints.append(
+                    f"heartbeat 证据已到 group={heartbeat_group}，结果上报仍是 group={remote_group}；说明当前组可能仍在执行中。"
+                )
+        if not hints and result_code == "completed":
+            hints.append(
+                "本轮任务已完成，等待下一次计划或新的协助任务。"
+            )
+        if not hints and not qiannian_running and local_group <= 0 and remote_group <= 0:
+            hints.append(
+                "当前未看到运行证据，等待计划时间或手动启动。"
+            )
+        return {
+            "comparison": " ； ".join(comparison_parts) if comparison_parts else "-",
+            "hint": " ".join(hints) if hints else "-",
+        }
+
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         task = snapshot.get("task", {})
         control = snapshot.get("control", {})
         runtime = snapshot.get("runtime", {})
         remote = snapshot.get("remote_runtime", {})
+        remote_supervision = snapshot.get("remote_supervision", {})
+        remote_result = snapshot.get("remote_result", {})
+        remote_heartbeat = snapshot.get("remote_heartbeat", {})
         local = snapshot.get("local_completion", {})
         progress = snapshot.get("status_progress", {})
         agent_processes = snapshot.get("agent_processes", [])
@@ -612,13 +720,14 @@ class GameToolGui:
             "profile_group_start", task.get("group_start", "-")
         )
         profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
+        insight = self._build_evidence_insight(snapshot)
 
         assist_summary = assist.get("summary", "") if isinstance(assist, dict) else ""
         self.assist_status_var.set(
             repair_text(
                 str(
                     assist_summary
-                    or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1"
+                    or "当前未接到临时协助任务"
                 )
             )
         )
@@ -637,11 +746,13 @@ class GameToolGui:
         self._set_var(
             "assist_summary",
             assist_summary
-            or "\u5f53\u524d\u672a\u63a5\u5230\u4e34\u65f6\u534f\u52a9\u4efb\u52a1",
+            or "当前未接到临时协助任务",
         )
         self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
         self._set_var("desired_run_state", control.get("desired_run_state", "-"))
-        self._set_var("auto_restart", bool(control.get("auto_restart_on_stale", False)))
+        self._set_var(
+            "auto_restart", bool(control.get("auto_restart_on_stale", False))
+        )
         self._set_var("exe_path", snapshot.get("exe_path"))
 
         self._set_var("local_status", runtime.get("status", "-"))
@@ -662,17 +773,56 @@ class GameToolGui:
         )
         self._set_var("qiannian_running", snapshot.get("qiannian_running", False))
         self._set_var(
+            "last_heartbeat_time",
+            runtime.get("last_heartbeat_at", "-") or "-",
+        )
+        self._set_var(
+            "local_progress_evidence",
+            f"group={progress.get('group', 0)} role={progress.get('role_index', 0)} / last_change={runtime.get('last_progress_change_at', '-') or '-'}",
+        )
+        self._set_var(
             "status_ini",
-            f"group={progress.get('group', 0)} role={progress.get('role_index', 0)} is_today={progress.get('is_today', False)}",
+            f"group={progress.get('group', 0)} role={progress.get('role_index', 0)} is_today={progress.get('is_today', False)} mtime={progress.get('mtime_epoch', 0)}",
         )
 
-        self._set_var("remote_has_report", bool(remote.get("has_report", False)))
-        self._set_var("remote_stale", bool(remote.get("stale", False)))
-        self._set_var("remote_completed", bool(remote.get("completed", False)))
-        self._set_var("remote_server_time", remote.get("server_time", "-"))
-        self._set_var("remote_elapsed", remote.get("elapsed", "-"))
-        self._set_var("remote_group", remote.get("current_group", "-"))
-        self._set_var("remote_role_index", remote.get("role_index", "-"))
+        remote_result_elapsed = (
+            remote_result.get("elapsed", "-")
+            if remote_result.get("elapsed") is not None
+            else "-"
+        )
+        remote_heartbeat_elapsed = (
+            remote_heartbeat.get("heartbeat_elapsed", "-")
+            if remote_heartbeat.get("heartbeat_elapsed") is not None
+            else "-"
+        )
+        self._set_var(
+            "remote_supervision_state",
+            self._format_remote_state(remote_supervision),
+        )
+        self._set_var(
+            "remote_supervision_detail",
+            remote_supervision.get("detail", "-") or "-",
+        )
+        self._set_var(
+            "remote_result_state",
+            self._format_remote_state(remote_result),
+        )
+        self._set_var(
+            "remote_result_detail",
+            remote_result.get("detail", "-") or "-",
+        )
+        self._set_var(
+            "remote_heartbeat",
+            f"has={bool(remote_heartbeat.get('has_heartbeat', False))} / at={remote_heartbeat.get('server_time', '-') or '-'} / elapsed={remote_heartbeat_elapsed}s",
+        )
+        self._set_var(
+            "remote_heartbeat_progress",
+            f"group={remote_heartbeat.get('status_group', '-')} role={remote_heartbeat.get('status_role_index', '-')} / last_progress={remote_heartbeat.get('last_progress_change_at', '-') or '-'}",
+        )
+        self._set_var(
+            "remote_result_progress",
+            f"group={remote.get('current_group', '-')} role={remote.get('role_index', '-')} / elapsed={remote_result_elapsed}s / time={remote.get('server_time', '-') or '-'}",
+        )
         self._set_var("remote_event", remote.get("event", "-"))
         self._set_var("control_error", control_error or "-")
 
@@ -691,9 +841,11 @@ class GameToolGui:
         )
         self._set_var(
             "last_progress",
-            f"group={runtime.get('last_seen_group', '-')} role={runtime.get('last_seen_role_index', '-')}",
+            f"group={runtime.get('last_seen_group', '-')} role={runtime.get('last_seen_role_index', '-')} / report_time={remote.get('server_time', '-') or '-'}",
         )
         self._set_var("status_date", progress.get("last_reset_date", "-"))
+        self._set_var("evidence_comparison", insight.get("comparison", "-"))
+        self._set_var("evidence_hint", insight.get("hint", "-"))
 
         self.raw_text.configure(state=tk.NORMAL)
         self.raw_text.delete("1.0", tk.END)
@@ -721,6 +873,9 @@ class GameToolGui:
         control: Dict[str, Any] = {}
         task: Dict[str, Any] = {}
         remote_runtime: Dict[str, Any] = {}
+        remote_supervision: Dict[str, Any] = {}
+        remote_result: Dict[str, Any] = {}
+        remote_heartbeat: Dict[str, Any] = {}
         assist: Dict[str, Any] = {}
         control_error = ""
 
@@ -742,6 +897,21 @@ class GameToolGui:
             remote_runtime = (
                 control_doc.get("runtime", {})
                 if isinstance(control_doc.get("runtime", {}), dict)
+                else {}
+            )
+            remote_supervision = (
+                control_doc.get("supervision", {})
+                if isinstance(control_doc.get("supervision", {}), dict)
+                else {}
+            )
+            remote_result = (
+                control_doc.get("result", {})
+                if isinstance(control_doc.get("result", {}), dict)
+                else {}
+            )
+            remote_heartbeat = (
+                control_doc.get("heartbeat", {})
+                if isinstance(control_doc.get("heartbeat", {}), dict)
                 else {}
             )
             assist = (
@@ -785,6 +955,9 @@ class GameToolGui:
             "control": control,
             "runtime": dict(runtime),
             "remote_runtime": remote_runtime,
+            "remote_supervision": remote_supervision,
+            "remote_result": remote_result,
+            "remote_heartbeat": remote_heartbeat,
             "status_progress": progress,
             "local_completion": local_completion,
             "local_status_detail": local_status_detail,
