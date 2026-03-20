@@ -2811,6 +2811,49 @@ class GameTool:
             return "report_stale"
         return ""
 
+    def maybe_stop_for_completed_task(
+        self,
+        state: Dict[str, Any],
+        runtime: Dict[str, Any],
+        remote_runtime: Dict[str, Any],
+        control: Dict[str, Any],
+        task: Dict[str, Any],
+    ) -> bool:
+        if not self.is_process_running():
+            return False
+
+        local_completion = self.get_local_completion_state(task, control)
+        remote_completed = bool(remote_runtime.get("completed", False))
+        local_completed = bool(local_completion.get("completed", False))
+        if not remote_completed and not local_completed:
+            return False
+
+        assist = task.get("assist", {}) if isinstance(task.get("assist", {}), dict) else {}
+        assist_active = bool(assist.get("active", False))
+        assist_role = str(assist.get("role", "") or "").strip().lower()
+        current_group = parse_int(local_completion.get("current_group"), 0)
+        role_index = parse_int(local_completion.get("role_index"), 0)
+        target_group_end = parse_int(local_completion.get("target_group_end"), 0)
+        complete_role_index = parse_int(local_completion.get("complete_role_index"), 0)
+
+        reason_parts = ["task_completed"]
+        if assist_active:
+            reason_parts.append(f"assist_{assist_role or 'active'}")
+        reason_parts.append("local" if local_completed else "remote")
+        stop_reason = ":".join(reason_parts)
+
+        print_line(
+            f"[AGENT] task completed, stop qiannian: reason={stop_reason} "
+            f"current_group={current_group} role_index={role_index} "
+            f"target_group_end={target_group_end} complete_role_index={complete_role_index}"
+        )
+        self.stop_qiannian(state, reason=stop_reason, clear_session=True)
+        runtime = self.get_runtime_state(state)
+        runtime["status"] = "completed"
+        runtime["session_active"] = False
+        self.save_state(state)
+        return True
+
     def handle_one_shot_action(
         self, state: Dict[str, Any], control_doc: Dict[str, Any]
     ) -> bool:
@@ -3033,6 +3076,12 @@ class GameTool:
                 if isinstance(control_doc.get("task", {}), dict)
                 else {}
             )
+
+            if self.maybe_stop_for_completed_task(
+                state, runtime, remote_runtime, control, task
+            ):
+                time.sleep(self.control_poll_seconds)
+                continue
 
             if self.should_resume_pending_session(runtime, control, task):
                 print_line(
