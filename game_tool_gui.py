@@ -288,6 +288,7 @@ class GameToolGui:
                 ("区服", "region"),
                 ("生效范围", "group_range"),
                 ("原配置范围", "profile_group_range"),
+                ("边界变化", "task_boundary_note"),
                 ("计划时间", "schedule_daily_start"),
                 ("期望状态", "desired_run_state"),
                 ("自动恢复", "auto_restart"),
@@ -296,7 +297,7 @@ class GameToolGui:
                 ("启动 EXE", "exe_path"),
             ],
             wraplength=300,
-            wrap_max_by_key={"exe_path": 280},
+            wrap_max_by_key={"task_boundary_note": 300, "exe_path": 280},
         )
         self._build_kv_grid(
             right_top,
@@ -625,7 +626,78 @@ class GameToolGui:
             return f"{label} ({code})"
         return label or code or "-"
 
-    def _build_evidence_insight(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
+    def _build_task_boundary_note(
+        self, task: Dict[str, Any], assist: Dict[str, Any]
+    ) -> str:
+        task = task if isinstance(task, dict) else {}
+        assist = assist if isinstance(assist, dict) else {}
+
+        current_start = core.parse_int(task.get("group_start"), 0)
+        current_end = core.parse_int(task.get("group_end"), 0)
+        profile_start = core.parse_int(
+            task.get("profile_group_start", task.get("group_start")),
+            current_start,
+        )
+        profile_end = core.parse_int(
+            task.get("profile_group_end", task.get("group_end")),
+            current_end,
+        )
+
+        assist_active = bool(assist.get("active", False))
+        assist_role = str(assist.get("role", "") or "").strip().lower()
+        delegate_start = core.parse_int(assist.get("delegate_start"), 0)
+        delegate_end = core.parse_int(assist.get("delegate_end"), 0)
+        original_target_group_end = core.parse_int(
+            assist.get("original_target_group_end"),
+            profile_end,
+        )
+        effective_target_group_end = core.parse_int(
+            assist.get("effective_target_group_end"),
+            current_end,
+        )
+
+        if assist_active and assist_role == "target":
+            helper_ids: List[str] = []
+            raw_helper_ids = assist.get("helper_agent_ids", [])
+            if isinstance(raw_helper_ids, list):
+                helper_ids = [
+                    str(item).strip() for item in raw_helper_ids if str(item).strip()
+                ]
+            helper_agent_id = str(assist.get("helper_agent_id", "") or "").strip()
+            if helper_agent_id and helper_agent_id not in helper_ids:
+                helper_ids.append(helper_agent_id)
+            helper_label = "、".join(helper_ids) if helper_ids else "helper"
+            if profile_end > current_end > 0:
+                note = (
+                    f"尾段已交给 {helper_label}：原结束组 {profile_end} -> 当前有效结束组 {current_end}"
+                )
+                if delegate_start > 0 and delegate_end >= delegate_start:
+                    note += f"；接手区间 {delegate_start}->{delegate_end}"
+                return note
+            return (
+                f"当前作为被协助目标机运行；有效结束组 {current_end or '-'}，"
+                f"原配置结束组 {profile_end or '-'}"
+            )
+
+        if assist_active and assist_role == "helper":
+            target_agent_id = str(assist.get("target_agent_id", "") or "").strip()
+            note = f"当前处于协助模式：执行 {current_start}->{current_end}"
+            if target_agent_id:
+                note += f"，目标 {target_agent_id}"
+            if original_target_group_end > 0:
+                note += f"；目标原结束组 {original_target_group_end}"
+                if effective_target_group_end > 0:
+                    note += f"，当前有效结束组 {effective_target_group_end}"
+            return note
+
+        if profile_start != current_start or profile_end != current_end:
+            return (
+                f"当前任务范围已调整：{profile_start}->{profile_end} -> "
+                f"{current_start}->{current_end}"
+            )
+        return "当前按原配置范围执行"
+
+    def _build_evidence_insight(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         remote_runtime = snapshot.get("remote_runtime", {})
         remote_supervision = snapshot.get("remote_supervision", {})
         remote_result = snapshot.get("remote_result", {})
@@ -633,6 +705,8 @@ class GameToolGui:
         progress = snapshot.get("status_progress", {})
         control_error = str(snapshot.get("control_error", "") or "").strip()
         qiannian_running = bool(snapshot.get("qiannian_running", False))
+        task = snapshot.get("task", {})
+        assist = snapshot.get("assist", {})
 
         supervision_label = (
             str(remote_supervision.get("state_label", "") or "-").strip() or "-"
@@ -647,6 +721,16 @@ class GameToolGui:
             0,
         )
         heartbeat_group = core.parse_int(remote_heartbeat.get("status_group"), 0)
+        current_group_end = core.parse_int(task.get("group_end"), 0)
+        profile_group_end = core.parse_int(
+            task.get("profile_group_end", task.get("group_end")),
+            current_group_end,
+        )
+        assist_active = bool(assist.get("active", False))
+        assist_role = str(assist.get("role", "") or "").strip().lower()
+        delegate_start = core.parse_int(assist.get("delegate_start"), 0)
+        delegate_end = core.parse_int(assist.get("delegate_end"), 0)
+        target_agent_id = str(assist.get("target_agent_id", "") or "").strip()
 
         comparison_parts: List[str] = []
         if supervision_label != "-" or result_label != "-":
@@ -656,6 +740,10 @@ class GameToolGui:
         if heartbeat_group > 0 or remote_group > 0 or local_group > 0:
             comparison_parts.append(
                 f"heartbeat={heartbeat_group or '-'} / report={remote_group or '-'} / 本地status={local_group or '-'}"
+            )
+        if profile_group_end > 0 and current_group_end > 0 and profile_group_end != current_group_end:
+            comparison_parts.append(
+                f"有效结束组={current_group_end} / 原结束组={profile_group_end}"
             )
 
         hints: List[str] = []
@@ -668,6 +756,23 @@ class GameToolGui:
                 hints.append(
                     "local_report 当前不可达，且本地未检测到千年进程；先恢复 report 服务，再看启动链路。"
                 )
+        if assist_active and assist_role == "target" and profile_group_end > current_group_end > 0:
+            hints.append(
+                f"当前尾段已外包：本机只应跑到 group={current_group_end}；原结束组 {profile_group_end} 之后的任务已交给 helper。"
+            )
+            max_seen_group = max(local_group, remote_group, heartbeat_group)
+            if max_seen_group > current_group_end:
+                hints.append(
+                    f"检测到进度已越过当前有效结束组 {current_group_end}；新版 agent 会在下一次轮询中自动停止 qiannian。"
+                )
+        elif assist_active and assist_role == "helper":
+            hint = f"当前处于协助模式，执行区间 {task.get('group_start', '-')}->{task.get('group_end', '-')}"
+            if target_agent_id:
+                hint += f"，目标 {target_agent_id}"
+            if delegate_start > 0 and delegate_end >= delegate_start:
+                hint += f"；协助段 {delegate_start}->{delegate_end}"
+            hint += "；不要按本机原配置范围判断完成。"
+            hints.append(hint)
         if supervision_code in {"suspected_stuck", "startup_failed"} and result_code == "fresh":
             hints.append(
                 "结果链路仍在刷新，但监督链路已落后；优先检查 game_tool agent 是否常驻、heartbeat 是否持续上报。"
@@ -702,7 +807,6 @@ class GameToolGui:
             "comparison": " ； ".join(comparison_parts) if comparison_parts else "-",
             "hint": " ".join(hints) if hints else "-",
         }
-
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         task = snapshot.get("task", {})
         control = snapshot.get("control", {})
@@ -742,6 +846,10 @@ class GameToolGui:
         self._set_var(
             "profile_group_range",
             f"{profile_group_start} -> {profile_group_end}",
+        )
+        self._set_var(
+            "task_boundary_note",
+            self._build_task_boundary_note(task, assist),
         )
         self._set_var(
             "assist_summary",
