@@ -769,6 +769,9 @@ class GameTool:
             "intent_reason": "",
             "intent_at": "",
             "intent_epoch": 0,
+            "resume_task_fingerprint": "",
+            "resume_task_kind": "",
+            "resume_task_label": "",
         }
         for key, expected in reset_fields.items():
             if runtime.get(key) != expected:
@@ -1063,6 +1066,9 @@ class GameTool:
             )
             print_line(
                 f"Local Status.ini: completed={local_completion.get('completed', False)} group={local_completion.get('current_group', 0)} role_index={local_completion.get('role_index', 0)} target_group_end={local_completion.get('target_group_end', 0)} complete_role_index={local_completion.get('complete_role_index', 0)} date={local_completion.get('status_date', '-') or '-'}"
+            )
+            print_line(
+                f"Local Detail: {self.describe_local_status(runtime, control, task, remote_runtime=remote_runtime, local_completion=local_completion)}"
             )
             if supervision:
                 print_line(
@@ -1962,12 +1968,104 @@ class GameTool:
         self.save_state(state)
         return True
 
+    def build_resume_task_identity(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task = task if isinstance(task, dict) else {}
+        if not task:
+            return {}
+        assist = task.get("assist", {}) if isinstance(task.get("assist", {}), dict) else {}
+        assist_active = bool(assist.get("active", False))
+        assist_role = str(assist.get("role", "") or "").strip().lower()
+        region = str(task.get("region", "") or "").strip()
+        task_mode = str(task.get("task_mode", "normal") or "normal").strip().lower() or "normal"
+        if assist_active and assist_role == "helper":
+            helper_ids_raw = assist.get("helper_agent_ids", [])
+            helper_ids: List[str] = []
+            if isinstance(helper_ids_raw, list):
+                helper_ids = [
+                    str(item or "").strip()
+                    for item in helper_ids_raw
+                    if str(item or "").strip()
+                ]
+            identity: Dict[str, Any] = {
+                "kind": "assist_helper",
+                "region": region,
+                "task_mode": task_mode,
+                "target_agent_id": str(assist.get("target_agent_id", "") or "").strip(),
+                "helper_agent_id": str(assist.get("helper_agent_id", "") or "").strip(),
+                "delegate_start": parse_int(assist.get("delegate_start"), 0),
+                "delegate_end": parse_int(assist.get("delegate_end"), 0),
+                "original_target_group_end": parse_int(
+                    assist.get("original_target_group_end"), 0
+                ),
+                "effective_target_group_end": parse_int(
+                    assist.get("effective_target_group_end"), 0
+                ),
+                "assist_id": parse_int(assist.get("id"), 0),
+                "work_date": str(assist.get("work_date", "") or "").strip(),
+                "created_at": str(assist.get("created_at", "") or "").strip(),
+            }
+            if helper_ids:
+                identity["helper_agent_ids"] = helper_ids
+            return identity
+
+        profile_group_start = parse_int(
+            task.get("profile_group_start"),
+            parse_int(task.get("group_start"), 0),
+        )
+        profile_group_end = parse_int(
+            task.get("profile_group_end"),
+            parse_int(task.get("group_end"), 0),
+        )
+        return {
+            "kind": "main_task",
+            "region": region,
+            "task_mode": task_mode,
+            "profile_group_start": max(0, profile_group_start),
+            "profile_group_end": max(0, profile_group_end),
+        }
+
+    def compute_resume_task_fingerprint(self, task: Dict[str, Any]) -> str:
+        identity = self.build_resume_task_identity(task)
+        if not identity:
+            return ""
+        payload = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def describe_resume_task(self, task: Dict[str, Any]) -> str:
+        identity = self.build_resume_task_identity(task)
+        if not identity:
+            return "-"
+        kind = str(identity.get("kind", "") or "")
+        if kind == "assist_helper":
+            target_agent_id = str(identity.get("target_agent_id", "") or "-")
+            delegate_start = parse_int(identity.get("delegate_start"), 0)
+            delegate_end = parse_int(identity.get("delegate_end"), 0)
+            region = str(identity.get("region", "") or "")
+            assist_id = parse_int(identity.get("assist_id"), 0)
+            pieces = [f"assist:{target_agent_id} {delegate_start}->{delegate_end}"]
+            if region:
+                pieces.append(f"region={region}")
+            if assist_id > 0:
+                pieces.append(f"id={assist_id}")
+            return " ".join(pieces)
+        return (
+            f"main:{identity.get('region', '') or '-'} "
+            f"{parse_int(identity.get('profile_group_start'), 0)}->{parse_int(identity.get('profile_group_end'), 0)} "
+            f"mode={identity.get('task_mode', 'normal') or 'normal'}"
+        )
+
     def resolve_resume_from_status_ini(
         self,
         bootstrap: Dict[str, Any],
+        runtime: Dict[str, Any],
         count_as_restart: bool,
     ) -> Dict[str, Any]:
         plan = self.build_ui_plan(bootstrap)
+        task = (
+            bootstrap.get("task", {})
+            if isinstance(bootstrap.get("task", {}), dict)
+            else {}
+        )
         configured_group = parse_int(plan.get("group_start"), 0)
         configured_role_index = parse_int(plan.get("role_index"), 0)
         progress = self.read_status_ini_progress()
@@ -1976,17 +2074,54 @@ class GameTool:
         ahead_of_config = group > configured_group or (
             group == configured_group and role_index > configured_role_index
         )
+        current_task_fingerprint = self.compute_resume_task_fingerprint(task)
+        current_task_label = self.describe_resume_task(task)
+        current_task_kind = str(
+            self.build_resume_task_identity(task).get("kind", "") or ""
+        )
+        stored_task_fingerprint = str(
+            runtime.get("resume_task_fingerprint", "") or ""
+        ).strip()
+        stored_task_label = str(runtime.get("resume_task_label", "") or "").strip() or "-"
+        same_task = bool(
+            current_task_fingerprint
+            and stored_task_fingerprint
+            and current_task_fingerprint == stored_task_fingerprint
+        )
+        same_day_session = str(runtime.get("session_date", "")).strip() == today_str()
         should_resume = False
         same_day_resume = False
         resume_reason = ""
+        resume_block_reason = ""
+        resume_block_detail = ""
 
-        if count_as_restart and group > 0:
+        if count_as_restart and group > 0 and same_task and same_day_session:
             should_resume = True
             resume_reason = "restart"
-        elif progress.get("is_today", False) and group > 0 and ahead_of_config:
+        elif progress.get("is_today", False) and group > 0 and ahead_of_config and same_task:
             should_resume = True
             same_day_resume = True
             resume_reason = "same_day_progress"
+        elif group <= 0:
+            resume_block_reason = "status_group_empty"
+        elif not current_task_fingerprint:
+            resume_block_reason = "current_task_missing"
+            resume_block_detail = f"current_task={current_task_label}"
+        elif not stored_task_fingerprint:
+            resume_block_reason = "previous_task_missing"
+            resume_block_detail = f"current_task={current_task_label}"
+        elif not same_task:
+            resume_block_reason = "task_changed"
+            resume_block_detail = (
+                f"previous_task={stored_task_label}({stored_task_fingerprint[:8] or '-'}) "
+                f"current_task={current_task_label}({current_task_fingerprint[:8] or '-'})"
+            )
+        elif count_as_restart and not same_day_session:
+            resume_block_reason = "previous_session_not_today"
+        elif not progress.get("is_today", False):
+            resume_block_reason = "status_not_today"
+        elif not ahead_of_config:
+            resume_block_reason = "status_not_ahead_of_config"
 
         return {
             "configured_group": configured_group,
@@ -1997,8 +2132,17 @@ class GameTool:
             "skip_load_button": should_resume,
             "same_day_resume": same_day_resume,
             "resume_reason": resume_reason,
+            "resume_block_reason": resume_block_reason,
+            "resume_block_detail": resume_block_detail,
             "status_date": str(progress.get("last_reset_date", "")).strip(),
             "is_today": bool(progress.get("is_today", False)),
+            "current_task_fingerprint": current_task_fingerprint,
+            "stored_task_fingerprint": stored_task_fingerprint,
+            "current_task_label": current_task_label,
+            "stored_task_label": stored_task_label,
+            "current_task_kind": current_task_kind,
+            "same_task": same_task,
+            "same_day_session": same_day_session,
         }
 
     def build_ui_plan(
@@ -2243,7 +2387,9 @@ class GameTool:
         self.save_state(state)
 
         resume_state = self.resolve_resume_from_status_ini(
-            bootstrap, count_as_restart=count_as_restart
+            bootstrap,
+            runtime,
+            count_as_restart=count_as_restart,
         )
         resume_group = parse_int(resume_state.get("resume_group"), 0)
         skip_load_button = bool(resume_state.get("skip_load_button", False))
@@ -2256,9 +2402,17 @@ class GameTool:
                 f"[RESUME] status.ini group={resume_group} role_index={status_role_index} date={status_date}; reason={resume_state.get('resume_reason', '-') or '-'}; skip configured start group"
             )
         else:
-            print_line(
-                f"[RESUME] status.ini not used: configured_group={resume_state.get('configured_group', 0)} status_group={status_group} role_index={status_role_index} date={status_date}"
-            )
+            block_reason = str(resume_state.get("resume_block_reason", "") or "")
+            block_detail = str(resume_state.get("resume_block_detail", "") or "")
+            detail_suffix = f"; {block_detail}" if block_detail else ""
+            if block_reason:
+                print_line(
+                    f"[RESUME] status.ini not used: block={block_reason}; configured_group={resume_state.get('configured_group', 0)} status_group={status_group} role_index={status_role_index} date={status_date}{detail_suffix}"
+                )
+            else:
+                print_line(
+                    f"[RESUME] status.ini not used: configured_group={resume_state.get('configured_group', 0)} status_group={status_group} role_index={status_role_index} date={status_date}"
+                )
 
         self.stop_qiannian(state, reason=f"pre-start:{reason}", clear_session=False)
 
@@ -2293,6 +2447,15 @@ class GameTool:
         runtime["last_pid"] = pid
         runtime["last_seen_report_time"] = ""
         runtime["last_seen_stale"] = False
+        runtime["resume_task_fingerprint"] = str(
+            resume_state.get("current_task_fingerprint", "") or ""
+        )
+        runtime["resume_task_kind"] = str(
+            resume_state.get("current_task_kind", "") or ""
+        )
+        runtime["resume_task_label"] = str(
+            resume_state.get("current_task_label", "") or ""
+        )
         if count_as_restart:
             if runtime.get("restart_count_date", "") != today_str():
                 runtime["restart_count_date"] = today_str()
@@ -2432,6 +2595,10 @@ class GameTool:
     ) -> bool:
         if str(control.get("desired_run_state", "run")).strip().lower() == "stop":
             return False
+        assist = task.get("assist", {}) if isinstance(task.get("assist", {}), dict) else {}
+        assist_active = bool(assist.get("active", False))
+        if not task.get("enabled", True) and not assist_active:
+            return False
         if self.is_process_running():
             return False
         if str(runtime.get("session_date", "")).strip() != today_str():
@@ -2440,6 +2607,12 @@ class GameTool:
             return False
         if bool(runtime.get("last_remote_completed", False)):
             return False
+        current_task_fingerprint = self.compute_resume_task_fingerprint(task)
+        stored_task_fingerprint = str(runtime.get("resume_task_fingerprint", "") or "").strip()
+        if not current_task_fingerprint or not stored_task_fingerprint:
+            return False
+        if current_task_fingerprint != stored_task_fingerprint:
+            return False
         local_completion = self.get_local_completion_state(task, control)
         if local_completion.get("completed", False):
             return False
@@ -2447,6 +2620,118 @@ class GameTool:
         return bool(progress.get("is_today", False)) and parse_int(
             progress.get("group"), 0
         ) > 0
+
+    def describe_schedule_wait(
+        self, runtime: Dict[str, Any], schedule_text: str
+    ) -> str:
+        schedule_text = str(schedule_text or "").strip()
+        next_schedule_date = str(runtime.get("next_schedule_date", "")).strip()
+        schedule = parse_hhmm(schedule_text)
+        if next_schedule_date:
+            if next_schedule_date == today_str():
+                if schedule is None:
+                    return "等待今天启动"
+                now_local = time.localtime()
+                current_minutes = now_local.tm_hour * 60 + now_local.tm_min
+                schedule_minutes = schedule[0] * 60 + schedule[1]
+                if current_minutes < schedule_minutes:
+                    return f"等待今天 {schedule_text} 启动"
+                return f"已到计划时间 {schedule_text}，等待 Agent 启动"
+            if schedule_text:
+                return f"等待 {next_schedule_date} {schedule_text} 启动"
+            return f"等待 {next_schedule_date} 启动"
+        if schedule_text:
+            return f"等待设定时间 {schedule_text} 启动"
+        return ""
+
+    def describe_local_status(
+        self,
+        runtime: Dict[str, Any],
+        control: Dict[str, Any],
+        task: Dict[str, Any],
+        remote_runtime: Optional[Dict[str, Any]] = None,
+        local_completion: Optional[Dict[str, Any]] = None,
+        progress: Optional[Dict[str, Any]] = None,
+        qiannian_running: Optional[bool] = None,
+    ) -> str:
+        remote_runtime = remote_runtime or {}
+        local_completion = local_completion or self.get_local_completion_state(task, control)
+        progress = progress or self.read_status_ini_progress()
+        if qiannian_running is None:
+            qiannian_running = self.is_process_running()
+
+        schedule_text = str(
+            control.get("schedule_daily_start") or runtime.get("schedule_daily_start") or ""
+        ).strip()
+        wait_detail = self.describe_schedule_wait(runtime, schedule_text)
+        status = str(runtime.get("status", "")).strip().lower()
+        desired_run_state = (
+            str(control.get("desired_run_state", "run")).strip().lower() or "run"
+        )
+        intent = str(runtime.get("intent", "")).strip().lower()
+        intent_reason = str(runtime.get("intent_reason", "")).strip().lower()
+        assist = task.get("assist", {}) if isinstance(task.get("assist", {}), dict) else {}
+        assist_active = bool(assist.get("active", False))
+        assist_summary = str(assist.get("summary", "") or "").strip()
+        pending_restart_reason = self.get_pending_restart_reason(
+            runtime, remote_runtime, control, task
+        )
+        restart_reason_label = {
+            "startup_no_report": "启动后未收到结果上报",
+            "report_stale": "结果上报超时",
+        }.get(pending_restart_reason, pending_restart_reason or "")
+
+        if desired_run_state == "stop":
+            return "远端已下发停止，等待重新启用"
+        if (
+            remote_runtime.get("completed", False)
+            or local_completion.get("completed", False)
+            or status == "completed"
+        ):
+            if wait_detail:
+                return f"本轮任务已完成，{wait_detail}"
+            return "本轮任务已完成，等待下一次计划"
+        if qiannian_running:
+            if assist_active:
+                return assist_summary or "协助任务运行中"
+            return "主任务运行中"
+        if self.should_resume_pending_session(runtime, control, task):
+            current_group = max(0, parse_int(progress.get("group"), 0))
+            if current_group > 0:
+                return f"检测到今天未完成进度，等待从组 {current_group} 续跑"
+            return "检测到今天未完成进度，等待续跑"
+        if pending_restart_reason and self.should_defer_auto_restart_until_schedule(
+            runtime, control
+        ):
+            if wait_detail:
+                return f"{restart_reason_label}，已延后到计划时间；{wait_detail}"
+            return f"{restart_reason_label}，已延后到下次计划时间"
+        if intent == "skip_today" or intent_reason == "manual_skip_today":
+            if wait_detail:
+                return f"今天已跳过，{wait_detail}"
+            return "今天已跳过，等待下一次计划"
+        if pending_restart_reason:
+            block_reason = self.get_auto_restart_block_reason(runtime, control)
+            if block_reason:
+                return f"{restart_reason_label}，但当前阻塞：{block_reason}"
+            return f"{restart_reason_label}，等待自动恢复"
+        if not task.get("enabled", True) and not assist_active:
+            if wait_detail:
+                return f"当前待命，{wait_detail}"
+            return "当前待命，等待远端启用或协助任务"
+        if wait_detail and not bool(runtime.get("session_active", False)):
+            if assist_active:
+                return f"待命机已接到协助任务，{wait_detail}"
+            return wait_detail
+        if assist_active:
+            return assist_summary or "已接到临时协助任务"
+        if status == "stopped":
+            return "已停止"
+        if status == "idle":
+            return "空闲，等待下一次同步"
+        if status == "running":
+            return "等待 Agent 拉起千年"
+        return "等待下一次同步"
 
     def should_force_daily_relaunch(
         self, runtime: Dict[str, Any], control: Dict[str, Any]
