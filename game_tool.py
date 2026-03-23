@@ -27,6 +27,8 @@ else:
     SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = SCRIPT_DIR / "game_tool_config.json"
 EXAMPLE_CONFIG_FILE = SCRIPT_DIR / "game_tool_config.example.json"
+AGENT_LOG_FILE = SCRIPT_DIR / "runtime" / "agent.log"
+WAIT_PROGRESS_LOG_INTERVAL_SECONDS = 10
 IS_WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -48,6 +50,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "launch_file": "runtime/launch.json",
         "manifest_file": "runtime/manifest.json",
         "state_file": "cache/state.json",
+        "local_action_file": "runtime/local_action.json",
         "exe_path": "QianNian.exe",
     },
     "behavior": {
@@ -63,6 +66,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "launch_ready_seconds": 20,
         "post_load_delay_seconds": 2,
         "load_confirm_timeout_seconds": 3,
+        "ui_dialog_stabilize_seconds": 3,
+        "ui_button_ready_timeout_seconds": 10,
         "launch_settle_seconds": 8,
         "post_clear_game_delay_seconds": 5,
         "startup_grace_seconds_fallback": 300,
@@ -93,6 +98,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 VALID_ONE_SHOT_ACTIONS = {"", "start_once", "restart_once", "sync_once", "stop_once"}
+VALID_LOCAL_AGENT_ACTIONS = {"", "sync_run_once"}
 BUTTON_ID_MAP = {
     "start": "start_button",
     "runtask": "runtask_button",
@@ -178,8 +184,61 @@ class RemoteRequestError(RuntimeError):
         self.kind = kind
 
 
+def append_agent_log(message: str) -> None:
+    try:
+        AGENT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        if AGENT_LOG_FILE.exists() and AGENT_LOG_FILE.stat().st_size > 2 * 1024 * 1024:
+            backup_file = AGENT_LOG_FILE.with_suffix(".log.1")
+            if backup_file.exists():
+                backup_file.unlink()
+            AGENT_LOG_FILE.replace(backup_file)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with AGENT_LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {message}\n")
+    except Exception:
+        return
+
+
 def print_line(message: str) -> None:
+    append_agent_log(str(message))
     print(message, flush=True)
+
+
+def maybe_emit_wait_progress(
+    label: str,
+    started_at: float,
+    last_logged_at: float,
+    total_seconds: int = 0,
+    extra: str = "",
+) -> float:
+    now = time.time()
+    if (now - last_logged_at) < WAIT_PROGRESS_LOG_INTERVAL_SECONDS:
+        return last_logged_at
+    elapsed_seconds = max(1, int(now - started_at))
+    total_suffix = f" / {int(total_seconds)}s" if total_seconds > 0 else ""
+    extra_suffix = f" {extra}" if extra else ""
+    print_line(f"[WAIT] {label}: 已等待 {elapsed_seconds}s{total_suffix}{extra_suffix}")
+    return now
+
+
+def sleep_with_progress(total_seconds: int, label: str) -> None:
+    total = max(0, int(total_seconds))
+    if total <= 0:
+        return
+    started_at = time.time()
+    deadline = started_at + total
+    last_logged_at = started_at
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(1.0, remaining))
+        last_logged_at = maybe_emit_wait_progress(
+            label,
+            started_at,
+            last_logged_at,
+            total_seconds=total,
+        )
 
 
 def now_str() -> str:
@@ -213,6 +272,13 @@ def parse_bool(value: Any, default: bool = False) -> bool:
 def normalize_action(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in VALID_ONE_SHOT_ACTIONS:
+        return text
+    return ""
+
+
+def normalize_local_agent_action(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in VALID_LOCAL_AGENT_ACTIONS:
         return text
     return ""
 
@@ -313,18 +379,33 @@ class Win32DialogController:
     def make_wparam(low_word: int, high_word: int) -> int:
         return (high_word << 16) | (low_word & 0xFFFF)
 
+    def activate_window(self, hwnd: int) -> None:
+        if hwnd <= 0:
+            return
+        self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+        try:
+            self.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        try:
+            self.user32.SetActiveWindow(hwnd)
+        except Exception:
+            pass
+
     def find_main_window(self, pid: int, timeout_seconds: int) -> int:
         deadline = time.time() + max(1, timeout_seconds)
         while time.time() < deadline:
             hwnd = self._find_main_window_once(pid)
             if hwnd:
-                self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+                self.activate_window(hwnd)
                 return hwnd
             time.sleep(0.5)
         raise RuntimeError(f"在 {timeout_seconds} 秒内未找到进程 {pid} 的主窗口")
 
     def find_main_window_ready(self, pid: int, timeout_seconds: int) -> Tuple[int, bool]:
-        deadline = time.time() + max(1, timeout_seconds)
+        started_at = time.time()
+        deadline = started_at + max(1, timeout_seconds)
+        last_logged_at = started_at
         confirmed_any = False
         while time.time() < deadline:
             hwnd = self._find_main_window_once(pid)
@@ -336,11 +417,24 @@ class Win32DialogController:
             if dialog_hwnd:
                 self._confirm_dialog_once(dialog_hwnd)
                 confirmed_any = True
+                last_logged_at = maybe_emit_wait_progress(
+                    "等待 qiannian 主窗口",
+                    started_at,
+                    last_logged_at,
+                    total_seconds=timeout_seconds,
+                    extra="(检测到启动弹窗并已尝试确认)",
+                )
                 time.sleep(0.3)
                 continue
             if hwnd:
-                self.user32.ShowWindow(hwnd, self.SW_RESTORE)
+                self.activate_window(hwnd)
                 return hwnd, confirmed_any
+            last_logged_at = maybe_emit_wait_progress(
+                "等待 qiannian 主窗口",
+                started_at,
+                last_logged_at,
+                total_seconds=timeout_seconds,
+            )
             time.sleep(0.3)
         raise RuntimeError(f"在 {timeout_seconds} 秒内未找到进程 {pid} 的主窗口")
 
@@ -432,7 +526,39 @@ class Win32DialogController:
 
     def click_button(self, parent_hwnd: int, control_id: int) -> None:
         child_hwnd = self.get_control(parent_hwnd, control_id)
+        self.activate_window(parent_hwnd)
+        try:
+            self.user32.SetFocus(child_hwnd)
+        except Exception:
+            pass
         self.user32.SendMessageW(child_hwnd, self.BM_CLICK, 0, 0)
+
+    def wait_control_enabled(
+        self,
+        parent_hwnd: int,
+        control_id: int,
+        timeout_seconds: int,
+        label: str = "control",
+    ) -> int:
+        started_at = time.time()
+        deadline = started_at + max(1, timeout_seconds)
+        last_logged_at = started_at
+        while time.time() < deadline:
+            child_hwnd = int(self.user32.GetDlgItem(parent_hwnd, control_id) or 0)
+            if child_hwnd and self.user32.IsWindow(child_hwnd):
+                if self.user32.IsWindowVisible(child_hwnd) and self.user32.IsWindowEnabled(child_hwnd):
+                    return child_hwnd
+            last_logged_at = maybe_emit_wait_progress(
+                f"等待 {label} 就绪",
+                started_at,
+                last_logged_at,
+                total_seconds=timeout_seconds,
+                extra=f"control_id={control_id}",
+            )
+            time.sleep(0.2)
+        raise RuntimeError(
+            f"在 {timeout_seconds} 秒内等待 {label} 就绪失败，control_id={control_id}"
+        )
 
     def post_click_button(self, parent_hwnd: int, control_id: int) -> None:
         child_hwnd = self.get_control(parent_hwnd, control_id)
@@ -556,10 +682,40 @@ class Win32DialogController:
         self.user32.PostMessageW(dialog_hwnd, self.WM_KEYUP, self.VK_RETURN, 0)
         return True
 
+    def drain_dialogs(
+        self,
+        pid: int,
+        owner_hwnd: int = 0,
+        timeout_seconds: int = 3,
+        stable_seconds: float = 0.6,
+    ) -> int:
+        started_at = time.time()
+        deadline = started_at + max(float(timeout_seconds), float(stable_seconds))
+        quiet_started_at = started_at
+        confirmed_count = 0
+        while time.time() < deadline:
+            dialog_hwnd = self._find_top_window_once(
+                pid,
+                class_name="#32770",
+                exclude_hwnd=owner_hwnd,
+            )
+            if dialog_hwnd:
+                self._confirm_dialog_once(dialog_hwnd)
+                confirmed_count += 1
+                quiet_started_at = time.time()
+                time.sleep(0.2)
+                continue
+            if time.time() - quiet_started_at >= max(0.4, float(stable_seconds)):
+                return confirmed_count
+            time.sleep(0.2)
+        return confirmed_count
+
     def confirm_message_box(
         self, pid: int, owner_hwnd: int = 0, timeout_seconds: int = 5
     ) -> str:
-        detect_deadline = time.time() + max(0, timeout_seconds)
+        detect_started_at = time.time()
+        detect_deadline = detect_started_at + max(0, timeout_seconds)
+        detect_last_logged_at = detect_started_at
         dialog_hwnd = 0
         while time.time() < detect_deadline:
             dialog_hwnd = self._find_top_window_once(
@@ -569,12 +725,20 @@ class Win32DialogController:
             )
             if dialog_hwnd:
                 break
+            detect_last_logged_at = maybe_emit_wait_progress(
+                "等待 load 确认弹窗出现",
+                detect_started_at,
+                detect_last_logged_at,
+                total_seconds=timeout_seconds,
+            )
             time.sleep(0.2)
 
         if not dialog_hwnd:
             return "not_found"
 
-        close_deadline = time.time() + max(1, timeout_seconds)
+        close_started_at = time.time()
+        close_deadline = close_started_at + max(1, timeout_seconds)
+        close_last_logged_at = close_started_at
         while time.time() < close_deadline:
             self._confirm_dialog_once(dialog_hwnd)
             time.sleep(0.2)
@@ -587,6 +751,12 @@ class Win32DialogController:
             )
             if next_dialog_hwnd:
                 dialog_hwnd = next_dialog_hwnd
+            close_last_logged_at = maybe_emit_wait_progress(
+                "等待 load 确认弹窗关闭",
+                close_started_at,
+                close_last_logged_at,
+                total_seconds=timeout_seconds,
+            )
 
         return "timeout"
 
@@ -619,6 +789,9 @@ class GameTool:
         self.launch_file = self.resolve_path(self.paths["launch_file"])
         self.manifest_file = self.resolve_path(self.paths["manifest_file"])
         self.state_file = self.resolve_path(self.paths["state_file"])
+        self.local_action_file = self.resolve_path(
+            self.paths.get("local_action_file", "runtime/local_action.json")
+        )
         self.exe_path = self.resolve_path(self.paths["exe_path"])
 
         self.control_poll_seconds = max(
@@ -644,6 +817,12 @@ class GameTool:
         )
         self.load_confirm_timeout_seconds = max(
             0, parse_int(self.behavior.get("load_confirm_timeout_seconds"), 3)
+        )
+        self.ui_dialog_stabilize_seconds = max(
+            0, parse_int(self.behavior.get("ui_dialog_stabilize_seconds"), 3)
+        )
+        self.ui_button_ready_timeout_seconds = max(
+            1, parse_int(self.behavior.get("ui_button_ready_timeout_seconds"), 10)
         )
         self.launch_settle_seconds = max(
             1, parse_int(self.behavior.get("launch_settle_seconds"), 8)
@@ -772,6 +951,12 @@ class GameTool:
             "resume_task_fingerprint": "",
             "resume_task_kind": "",
             "resume_task_label": "",
+            "last_agent_loop_time": "",
+            "last_agent_loop_epoch": 0,
+            "agent_phase": "",
+            "last_local_action_seq": 0,
+            "last_local_action": "",
+            "last_local_action_time": "",
         }
         for key, expected in reset_fields.items():
             if runtime.get(key) != expected:
@@ -783,6 +968,25 @@ class GameTool:
                 f"[STATE] cleared previous-day runtime without active process: session_date={session_date} -> {today_str()}"
             )
         return changed
+
+    def touch_agent_loop(self, state: Dict[str, Any], phase: str = "polling") -> None:
+        runtime = self.get_runtime_state(state)
+        runtime["last_agent_loop_time"] = now_str()
+        runtime["last_agent_loop_epoch"] = int(time.time())
+        runtime["agent_phase"] = str(phase or "polling").strip() or "polling"
+        self.save_state(state)
+
+    def mark_agent_phase(
+        self,
+        state: Optional[Dict[str, Any]],
+        phase: str,
+        message: str = "",
+    ) -> None:
+        phase_text = str(phase or "").strip()
+        if state is not None and phase_text:
+            self.touch_agent_loop(state, phase=phase_text)
+        if message:
+            print_line(message)
 
     def build_url(
         self, path_or_url: str, params: Optional[Dict[str, Any]] = None
@@ -1403,7 +1607,7 @@ class GameTool:
         bootstrap = load_json_file(self.bootstrap_file, default={}) or {}
         if not isinstance(bootstrap, dict) or not bootstrap:
             raise RuntimeError(
-                "未找到 bootstrap.json 中的 launch 配置，无法 warm restart"
+                "未找到本地锁定快照 bootstrap.json，无法执行定时启动/续跑/重启；请先人工执行一次“同步并运行一次”"
             )
         return bootstrap
 
@@ -1580,12 +1784,21 @@ class GameTool:
                 errors="ignore",
             )
 
-        deadline = time.time() + self.window_cleanup_timeout_seconds
+        started_at = time.time()
+        deadline = started_at + self.window_cleanup_timeout_seconds
+        last_logged_at = started_at
         remaining = list(unique_pids)
         while time.time() < deadline:
             remaining = [pid for pid in unique_pids if self.is_pid_running(pid)]
             if not remaining:
                 return True
+            last_logged_at = maybe_emit_wait_progress(
+                "等待目标游戏进程退出",
+                started_at,
+                last_logged_at,
+                total_seconds=self.window_cleanup_timeout_seconds,
+                extra=f"remaining={remaining}",
+            )
             time.sleep(1)
         raise RuntimeError(f"external cleanup timeout, remaining pids: {remaining}")
 
@@ -1638,10 +1851,18 @@ class GameTool:
             errors="ignore",
         )
 
-        deadline = time.time() + self.process_stop_timeout_seconds
+        started_at = time.time()
+        deadline = started_at + self.process_stop_timeout_seconds
+        last_logged_at = started_at
         while time.time() < deadline:
             if not self.list_process_pids(target):
                 return True
+            last_logged_at = maybe_emit_wait_progress(
+                f"等待 {target} 退出",
+                started_at,
+                last_logged_at,
+                total_seconds=self.process_stop_timeout_seconds,
+            )
             time.sleep(1)
         raise RuntimeError(f"关闭进程超时: {target}")
 
@@ -1968,6 +2189,56 @@ class GameTool:
         self.save_state(state)
         return True
 
+    def load_local_agent_action(self) -> Dict[str, Any]:
+        request = load_json_file(self.local_action_file, default={}) or {}
+        return request if isinstance(request, dict) else {}
+
+    def enqueue_local_agent_action(
+        self, action: str, source: str = "gui"
+    ) -> Dict[str, Any]:
+        normalized_action = normalize_local_agent_action(action)
+        if not normalized_action:
+            raise RuntimeError(f"不支持的本地 agent 动作: {action}")
+        existing = self.load_local_agent_action()
+        existing_seq = parse_int(existing.get("seq"), 0)
+        next_seq = max(int(time.time() * 1000), existing_seq + 1)
+        request = {
+            "seq": next_seq,
+            "action": normalized_action,
+            "requested_at": now_str(),
+            "source": str(source or "gui").strip() or "gui",
+        }
+        save_json_file(self.local_action_file, request)
+        return request
+
+    def handle_local_agent_action(self, state: Dict[str, Any]) -> bool:
+        runtime = self.get_runtime_state(state)
+        request = self.load_local_agent_action()
+        seq = parse_int(request.get("seq"), 0)
+        action = normalize_local_agent_action(request.get("action", ""))
+        last_seq = parse_int(runtime.get("last_local_action_seq"), 0)
+        if seq <= 0 or seq <= last_seq or not action:
+            return False
+
+        runtime["last_local_action_seq"] = seq
+        runtime["last_local_action"] = action
+        runtime["last_local_action_time"] = str(
+            request.get("requested_at", "") or now_str()
+        ).strip() or now_str()
+        self.save_state(state)
+
+        source = str(request.get("source", "") or "").strip() or "-"
+        print_line(f"[AGENT] 收到本地动作: action={action} seq={seq} source={source}")
+        if action == "sync_run_once":
+            self.start_session(
+                state,
+                reason="local_action:sync_run_once",
+                use_sync=True,
+                count_as_restart=False,
+            )
+            return True
+        return False
+
     def build_resume_task_identity(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task = task if isinstance(task, dict) else {}
         if not task:
@@ -2230,15 +2501,45 @@ class GameTool:
         bootstrap: Dict[str, Any],
         resume_group: int = 0,
         skip_load_button: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+        reason: str = "",
     ) -> Dict[str, Any]:
         if not self.ui_enabled:
             return
         if self.dialog_controller is None:
             raise RuntimeError("UI controller is not initialized")
 
+        phase_prefix = f"ui:{reason}" if reason else "ui"
+        self.mark_agent_phase(
+            state,
+            f"{phase_prefix}:wait_main_window",
+            f"[UI-STEP] waiting main window ready: pid={pid} timeout={self.window_find_timeout_seconds}s",
+        )
+        wait_main_started_at = time.time()
         hwnd, startup_dialog_confirmed = self.dialog_controller.find_main_window_ready(
             pid, self.window_find_timeout_seconds
         )
+        print_line(
+            f"[UI-STEP] main window ready after {time.time() - wait_main_started_at:.1f}s: hwnd={hwnd} startup_dialog_confirmed={startup_dialog_confirmed}"
+        )
+        self.dialog_controller.activate_window(hwnd)
+        if self.ui_dialog_stabilize_seconds > 0:
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:drain_startup_dialogs",
+                f"[UI-STEP] drain late startup dialogs: timeout={self.ui_dialog_stabilize_seconds}s",
+            )
+            drained_dialogs = self.dialog_controller.drain_dialogs(
+                pid,
+                owner_hwnd=hwnd,
+                timeout_seconds=self.ui_dialog_stabilize_seconds,
+            )
+            if drained_dialogs > 0:
+                print_line(
+                    f"[UI-STEP] drained late startup dialogs before ui plan: count={drained_dialogs}"
+                )
+            self.dialog_controller.activate_window(hwnd)
+
         effective_resume_group = resume_group
         if startup_dialog_confirmed:
             if resume_group > 0:
@@ -2246,6 +2547,12 @@ class GameTool:
                     f"[UI] completion dialog detected; ignore resume_group={resume_group} and restart from configured group"
                 )
             effective_resume_group = 0
+
+        self.mark_agent_phase(
+            state,
+            f"{phase_prefix}:build_plan",
+            "[UI-STEP] building ui plan from bootstrap",
+        )
         plan = self.build_ui_plan(
             bootstrap,
             resume_group=effective_resume_group,
@@ -2261,10 +2568,20 @@ class GameTool:
         role_index_edit_id = parse_int(self.control_ids.get("role_index_edit"), 1016)
 
         if plan["region"]:
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:select_region",
+                f"[UI-STEP] selecting region: {plan['region']} (control_id={region_combo_id})",
+            )
             self.dialog_controller.select_combo_text(
                 hwnd, region_combo_id, plan["region"]
             )
         if plan["group_start"] > 0:
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:set_group_start",
+                f"[UI-STEP] writing group_start: {plan['group_start']} (control_id={current_group_edit_id})",
+            )
             self.dialog_controller.set_edit_text(
                 hwnd, current_group_edit_id, str(plan["group_start"])
             )
@@ -2275,7 +2592,14 @@ class GameTool:
                 plan.get("force_load_button", False)
             )
             if should_click_load_button:
-                role_index_to_write = 0 if plan.get("force_load_button", False) else plan["role_index"]
+                role_index_to_write = (
+                    0 if plan.get("force_load_button", False) else plan["role_index"]
+                )
+                self.mark_agent_phase(
+                    state,
+                    f"{phase_prefix}:set_role_index",
+                    f"[UI-STEP] writing role_index: {role_index_to_write} (control_id={role_index_edit_id})",
+                )
                 self.dialog_controller.set_edit_text(
                     hwnd, role_index_edit_id, str(role_index_to_write)
                 )
@@ -2286,28 +2610,71 @@ class GameTool:
                     print_line(
                         "[UI] startup completion dialog accepted; reset role_index to 0 and click load_button once to clear qiannian completion prompt"
                     )
+                self.mark_agent_phase(
+                    state,
+                    f"{phase_prefix}:wait_load_button_ready",
+                    f"[UI-STEP] waiting load_button enabled: timeout={self.ui_button_ready_timeout_seconds}s control_id={load_button_id}",
+                )
+                self.dialog_controller.wait_control_enabled(
+                    hwnd,
+                    load_button_id,
+                    self.ui_button_ready_timeout_seconds,
+                    label="load_button",
+                )
+                self.dialog_controller.activate_window(hwnd)
+                self.mark_agent_phase(
+                    state,
+                    f"{phase_prefix}:click_load_button",
+                    f"[UI-STEP] click load_button (control_id={load_button_id})",
+                )
                 self.dialog_controller.click_button(hwnd, load_button_id)
                 print_line(f"[UI] clicked load_button (control_id={load_button_id})")
                 if self.load_confirm_timeout_seconds > 0:
+                    self.mark_agent_phase(
+                        state,
+                        f"{phase_prefix}:wait_load_confirm",
+                        f"[UI-STEP] waiting load confirm dialog: timeout={self.load_confirm_timeout_seconds}s",
+                    )
+                    confirm_started_at = time.time()
                     confirm_status = self.dialog_controller.confirm_message_box(
                         pid,
                         owner_hwnd=hwnd,
                         timeout_seconds=self.load_confirm_timeout_seconds,
                     )
                     if confirm_status == "confirmed":
-                        print_line("[UI] load_button confirm dialog accepted")
+                        print_line(
+                            f"[UI-STEP] load_button confirm dialog accepted after {time.time() - confirm_started_at:.1f}s"
+                        )
+                    elif confirm_status == "not_found":
+                        print_line(
+                            f"[UI-STEP] no load confirm dialog detected within {self.load_confirm_timeout_seconds}s"
+                        )
                     elif confirm_status == "timeout":
                         raise RuntimeError(
-                            f"加载账号确认弹窗未能在 {self.load_confirm_timeout_seconds} 秒内自动关闭"
+                            f"加载确认框在 {self.load_confirm_timeout_seconds} 秒内未消失"
                         )
                 if self.post_load_delay_seconds > 0:
-                    print_line(f"[UI] wait after load: {self.post_load_delay_seconds}s")
-                    time.sleep(self.post_load_delay_seconds)
+                    self.mark_agent_phase(
+                        state,
+                        f"{phase_prefix}:wait_after_load",
+                        f"[UI-STEP] wait after load: {self.post_load_delay_seconds}s",
+                    )
+                    sleep_with_progress(
+                        self.post_load_delay_seconds,
+                        "等待 load_button 后稳定",
+                    )
             else:
-                print_line(
-                    "[UI] recovery mode: skip load_button and keep the group restored by qiannian startup"
+                self.mark_agent_phase(
+                    state,
+                    f"{phase_prefix}:skip_load_button",
+                    "[UI-STEP] recovery mode: skip load_button and keep the group restored by qiannian startup",
                 )
         if plan["group_end"] > 0:
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:set_group_end",
+                f"[UI-STEP] writing group_end: {plan['group_end']} (control_id={max_group_edit_id})",
+            )
             self.dialog_controller.set_edit_text(
                 hwnd, max_group_edit_id, str(plan["group_end"])
             )
@@ -2317,6 +2684,11 @@ class GameTool:
 
         checkbox_plan = plan.get("checkboxes")
         if isinstance(checkbox_plan, dict):
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:set_checkboxes",
+                f"[UI-STEP] applying checkbox plan: {len(CHECKBOX_ID_MAP)} items",
+            )
             for checkbox_name, control_key in CHECKBOX_ID_MAP.items():
                 control_id = parse_int(self.control_ids.get(control_key), 0)
                 if control_id <= 0:
@@ -2331,6 +2703,11 @@ class GameTool:
                 )
 
         if plan["launch_button"] == "none":
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:skip_launch_button",
+                "[UI-STEP] plan launch_button=none, skip task button click",
+            )
             print_line(
                 f"[UI] plan region={plan['region'] or '-'} group_start={plan['group_start']} role_index={plan['role_index']} group_end={plan['group_end']} button=none(skip task button click)"
             )
@@ -2342,7 +2719,39 @@ class GameTool:
         button_id = parse_int(self.control_ids.get(button_key), 0)
         if button_id <= 0:
             raise RuntimeError(f"button id is not configured: {button_key}")
-        time.sleep(0.5)
+        if self.ui_dialog_stabilize_seconds > 0:
+            self.mark_agent_phase(
+                state,
+                f"{phase_prefix}:drain_before_task_button",
+                f"[UI-STEP] drain dialogs before task button: timeout={self.ui_dialog_stabilize_seconds}s",
+            )
+            drained_dialogs = self.dialog_controller.drain_dialogs(
+                pid,
+                owner_hwnd=hwnd,
+                timeout_seconds=self.ui_dialog_stabilize_seconds,
+            )
+            if drained_dialogs > 0:
+                print_line(
+                    f"[UI-STEP] drained dialogs before task button: count={drained_dialogs}"
+                )
+        self.mark_agent_phase(
+            state,
+            f"{phase_prefix}:wait_task_button_ready:{plan['launch_button']}",
+            f"[UI-STEP] waiting task button enabled: {plan['launch_button']} timeout={self.ui_button_ready_timeout_seconds}s control_id={button_id}",
+        )
+        self.dialog_controller.wait_control_enabled(
+            hwnd,
+            button_id,
+            self.ui_button_ready_timeout_seconds,
+            label=f"task_button:{plan['launch_button']}",
+        )
+        self.dialog_controller.activate_window(hwnd)
+        self.mark_agent_phase(
+            state,
+            f"{phase_prefix}:click_task_button:{plan['launch_button']}",
+            f"[UI-STEP] click task button: {plan['launch_button']} (control_id={button_id})",
+        )
+        time.sleep(0.8)
         self.dialog_controller.click_button(hwnd, button_id)
         print_line(
             f"[UI] plan region={plan['region'] or '-'} group_start={plan['group_start']} role_index={plan['role_index']} group_end={plan['group_end']} button={plan['launch_button']}"
@@ -2355,6 +2764,11 @@ class GameTool:
     def start_session(
         self, state: Dict[str, Any], reason: str, use_sync: bool, count_as_restart: bool
     ) -> bool:
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:prepare_bootstrap",
+            f"[STEP] start_session begin: reason={reason} use_sync={use_sync} count_as_restart={count_as_restart}",
+        )
         bootstrap = self.prepare_bootstrap(use_sync=use_sync)
         task = (
             bootstrap.get("task", {})
@@ -2386,6 +2800,11 @@ class GameTool:
         )
         self.save_state(state)
 
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:resolve_resume",
+            "[STEP] resolve resume state from local status.ini",
+        )
         resume_state = self.resolve_resume_from_status_ini(
             bootstrap,
             runtime,
@@ -2414,6 +2833,11 @@ class GameTool:
                     f"[RESUME] status.ini not used: configured_group={resume_state.get('configured_group', 0)} status_group={status_group} role_index={status_role_index} date={status_date}"
                 )
 
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:stop_old_process",
+            f"[STEP] stop previous qiannian before start: reason={reason}",
+        )
         self.stop_qiannian(state, reason=f"pre-start:{reason}", clear_session=False)
 
         need_external_cleanup = bool(
@@ -2422,20 +2846,53 @@ class GameTool:
             or resume_state.get("same_day_resume", False)
         )
         if need_external_cleanup:
+            self.mark_agent_phase(
+                state,
+                f"start_session:{reason}:cleanup_external_windows",
+                f"[STEP] cleanup external game windows before start: reason={reason}",
+            )
             self.cleanup_external_windows(reason)
 
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:launch_process",
+            "[STEP] launching qiannian process",
+        )
         pid = self.launch_process()
+        print_line(f"[STEP] qiannian process launched: pid={pid}")
         if self.launch_ready_seconds > 0:
-            print_line(f"[LAUNCH] wait for qiannian init: {self.launch_ready_seconds}s")
-            time.sleep(self.launch_ready_seconds)
+            self.mark_agent_phase(
+                state,
+                f"start_session:{reason}:wait_launch_ready",
+                f"[LAUNCH] wait for qiannian init: {self.launch_ready_seconds}s",
+            )
+            sleep_with_progress(self.launch_ready_seconds, "等待 qiannian 初始化")
 
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:apply_ui",
+            f"[STEP] begin UI injection for qiannian: pid={pid}",
+        )
         applied_plan = self.apply_bootstrap_to_window(
             pid,
             bootstrap,
             resume_group=resume_group,
             skip_load_button=skip_load_button,
+            state=state,
+            reason=reason,
         )
-        time.sleep(self.launch_settle_seconds)
+        if self.launch_settle_seconds > 0:
+            self.mark_agent_phase(
+                state,
+                f"start_session:{reason}:wait_launch_settle",
+                f"[STEP] wait after task button click: {self.launch_settle_seconds}s",
+            )
+            sleep_with_progress(self.launch_settle_seconds, "等待任务启动后稳定")
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:notify_recovering",
+            f"[STEP] report recovering state: reason={reason}",
+        )
         self.notify_recovering(reason, applied_plan, control)
 
         runtime["status"] = "running"
@@ -2468,7 +2925,11 @@ class GameTool:
             runtime["last_restart_reason"] = reason
         self.save_state(state)
         self.maybe_post_heartbeat(state, force=True)
-        print_line(f"[AGENT] started qiannian, pid={pid}, reason={reason}")
+        self.mark_agent_phase(
+            state,
+            f"start_session:{reason}:running",
+            f"[AGENT] started qiannian, pid={pid}, reason={reason}",
+        )
         return True
 
     def ensure_restart_counter(self, runtime: Dict[str, Any]) -> None:
@@ -2871,10 +3332,12 @@ class GameTool:
 
         print_line(f"[AGENT] 收到动作: action={action} seq={action_seq}")
         if action == "sync_once":
-            self.do_sync()
+            print_line(
+                "[AGENT] 已忽略远端 sync_once：当前策略要求人工点击“同步并运行一次”后才切换任务"
+            )
         elif action == "start_once":
-            self.start_session(
-                state, reason="action:start_once", use_sync=True, count_as_restart=False
+            print_line(
+                "[AGENT] 已忽略远端 start_once：当前策略要求人工点击“同步并运行一次”后才启动新任务"
             )
         elif action == "restart_once":
             self.start_session(
@@ -2997,144 +3460,179 @@ class GameTool:
         self.ensure_dirs()
         print_line(f"[AGENT] 启动常驻模式, agent_id={self.agent_id}")
         while True:
-            state = self.normalize_state_for_agent(self.load_state())
-            if self.normalize_runtime_for_today(state):
-                self.save_state(state)
-            runtime = self.get_runtime_state(state)
-            self.ensure_restart_counter(runtime)
-            progress, progress_changed = self.update_progress_evidence(state)
-            if progress_changed:
-                self.save_state(state)
-            else:
-                self.save_state(state)
-
             try:
-                control_doc = self.fetch_control()
-                control_recovered = self.update_runtime_from_control(state, control_doc)
-                if control_recovered:
-                    print_line("[AGENT] 已恢复从 local_report 拉取控制信息")
-            except Exception as exc:
-                runtime = self.mark_control_error(state, exc)
-                if self.should_emit_control_error_log(runtime):
-                    print_line(self.build_control_error_log(runtime))
-                time.sleep(self.control_error_retry_seconds)
-                continue
-
-            state = self.normalize_state_for_agent(self.load_state())
-            runtime = self.get_runtime_state(state)
-            progress, progress_changed = self.update_progress_evidence(state)
-            if progress_changed:
-                self.save_state(state)
-            self.maybe_post_heartbeat(state, progress=progress)
-            control = (
-                control_doc.get("control", {})
-                if isinstance(control_doc.get("control", {}), dict)
-                else {}
-            )
-            remote_runtime = (
-                control_doc.get("runtime", {})
-                if isinstance(control_doc.get("runtime", {}), dict)
-                else {}
-            )
-            if self.sync_schedule_runtime(runtime, control):
-                self.save_state(state)
-            desired_run_state = (
-                str(control.get("desired_run_state", "run")).strip().lower() or "run"
-            )
-
-            if desired_run_state == "stop":
-                self.stop_qiannian(
-                    state, reason="desired_run_state=stop", clear_session=True
-                )
-                runtime["status"] = "stopped"
-                self.save_state(state)
-                time.sleep(self.control_poll_seconds)
-                continue
-
-            if self.handle_one_shot_action(state, control_doc):
-                time.sleep(self.control_poll_seconds)
-                continue
-            state = self.normalize_state_for_agent(self.load_state())
-            runtime = self.get_runtime_state(state)
-            self.ensure_restart_counter(runtime)
-
-            if self.should_force_daily_relaunch(runtime, control):
-                if self.start_session(
-                    state,
-                    reason="daily_rollover",
-                    use_sync=True,
-                    count_as_restart=False,
-                ):
-                    runtime = self.get_runtime_state(state)
-                    runtime["last_schedule_date"] = today_str()
+                state = self.normalize_state_for_agent(self.load_state())
+                self.touch_agent_loop(state, phase="polling_control")
+                if self.normalize_runtime_for_today(state):
                     self.save_state(state)
-                time.sleep(self.control_poll_seconds)
-                continue
-
-            task = (
-                control_doc.get("task", {})
-                if isinstance(control_doc.get("task", {}), dict)
-                else {}
-            )
-
-            if self.maybe_stop_for_completed_task(
-                state, runtime, remote_runtime, control, task
-            ):
-                time.sleep(self.control_poll_seconds)
-                continue
-
-            if self.should_resume_pending_session(runtime, control, task):
-                print_line(
-                    "[AGENT] 检测到今天存在未完成进度，准备自动续跑；如果这不是预期行为，请先停止 agent 并执行 `game_tool.exe skip-today`。"
-                )
-                self.start_session(
-                    state,
-                    reason="resume_pending_session",
-                    use_sync=True,
-                    count_as_restart=True,
-                )
-                time.sleep(self.control_poll_seconds)
-                continue
-
-            if self.should_run_daily_schedule(runtime, control):
-                started = self.start_session(
-                    state,
-                    reason="daily_schedule",
-                    use_sync=True,
-                    count_as_restart=False,
-                )
                 runtime = self.get_runtime_state(state)
-                runtime["last_schedule_result"] = (
-                    "started" if started else "skipped_disabled"
-                )
-                self.advance_schedule_date(runtime)
-                self.save_state(state)
+                self.ensure_restart_counter(runtime)
+                progress, progress_changed = self.update_progress_evidence(state)
+                if progress_changed:
+                    self.save_state(state)
+                else:
+                    self.save_state(state)
 
-            if bool(control.get("auto_restart_on_stale", False)):
-                pending_reason = self.get_pending_restart_reason(
-                    runtime, remote_runtime, control, task
+                try:
+                    control_doc = self.fetch_control()
+                    control_recovered = self.update_runtime_from_control(
+                        state, control_doc
+                    )
+                    if control_recovered:
+                        print_line("[AGENT] 已恢复从 local_report 拉取控制信息")
+                except Exception as exc:
+                    self.touch_agent_loop(state, phase="control_error")
+                    runtime = self.mark_control_error(state, exc)
+                    if self.should_emit_control_error_log(runtime):
+                        print_line(self.build_control_error_log(runtime))
+                    time.sleep(self.control_error_retry_seconds)
+                    continue
+
+                state = self.normalize_state_for_agent(self.load_state())
+                runtime = self.get_runtime_state(state)
+                progress, progress_changed = self.update_progress_evidence(state)
+                if progress_changed:
+                    self.save_state(state)
+                self.maybe_post_heartbeat(state, progress=progress)
+                control = (
+                    control_doc.get("control", {})
+                    if isinstance(control_doc.get("control", {}), dict)
+                    else {}
                 )
-                if pending_reason:
-                    if self.should_defer_auto_restart_until_schedule(runtime, control):
-                        print_line(
-                            f"[AGENT] auto restart deferred until schedule: pending={pending_reason} next_date={runtime.get('next_schedule_date', '-') or '-'} schedule={control.get('schedule_daily_start', '-') or '-'} session_date={runtime.get('session_date', '-') or '-'}"
-                        )
-                    else:
-                        block_reason = self.get_auto_restart_block_reason(
-                            runtime, control
-                        )
-                        if not block_reason:
-                            self.start_session(
-                                state,
-                                reason=pending_reason,
-                                use_sync=False,
-                                count_as_restart=True,
+                remote_runtime = (
+                    control_doc.get("runtime", {})
+                    if isinstance(control_doc.get("runtime", {}), dict)
+                    else {}
+                )
+                if self.sync_schedule_runtime(runtime, control):
+                    self.save_state(state)
+                desired_run_state = (
+                    str(control.get("desired_run_state", "run")).strip().lower()
+                    or "run"
+                )
+
+                if desired_run_state == "stop":
+                    self.touch_agent_loop(state, phase="remote_stop")
+                    self.stop_qiannian(
+                        state, reason="desired_run_state=stop", clear_session=True
+                    )
+                    runtime["status"] = "stopped"
+                    self.save_state(state)
+                    time.sleep(self.control_poll_seconds)
+                    continue
+
+                if self.handle_local_agent_action(state):
+                    self.touch_agent_loop(state, phase="local_action")
+                    time.sleep(self.control_poll_seconds)
+                    continue
+
+                if self.handle_one_shot_action(state, control_doc):
+                    self.touch_agent_loop(state, phase="one_shot_action")
+                    time.sleep(self.control_poll_seconds)
+                    continue
+                state = self.normalize_state_for_agent(self.load_state())
+                runtime = self.get_runtime_state(state)
+                self.ensure_restart_counter(runtime)
+
+                if self.should_force_daily_relaunch(runtime, control):
+                    self.touch_agent_loop(state, phase="daily_rollover")
+                    if self.start_session(
+                        state,
+                        reason="daily_rollover",
+                        use_sync=False,
+                        count_as_restart=False,
+                    ):
+                        runtime = self.get_runtime_state(state)
+                        runtime["last_schedule_date"] = today_str()
+                        self.save_state(state)
+                    time.sleep(self.control_poll_seconds)
+                    continue
+
+                task = (
+                    control_doc.get("task", {})
+                    if isinstance(control_doc.get("task", {}), dict)
+                    else {}
+                )
+
+                if self.maybe_stop_for_completed_task(
+                    state, runtime, remote_runtime, control, task
+                ):
+                    self.touch_agent_loop(state, phase="completed_stop")
+                    time.sleep(self.control_poll_seconds)
+                    continue
+
+                if self.should_resume_pending_session(runtime, control, task):
+                    self.touch_agent_loop(state, phase="resume_pending_session")
+                    print_line(
+                        "[AGENT] 检测到今天存在未完成进度，准备自动续跑；如果这不是预期行为，请先停止 agent 并执行 `game_tool.exe skip-today`。"
+                    )
+                    self.start_session(
+                        state,
+                        reason="resume_pending_session",
+                        use_sync=False,
+                        count_as_restart=True,
+                    )
+                    time.sleep(self.control_poll_seconds)
+                    continue
+
+                if self.should_run_daily_schedule(runtime, control):
+                    self.touch_agent_loop(state, phase="daily_schedule")
+                    started = self.start_session(
+                        state,
+                        reason="daily_schedule",
+                        use_sync=False,
+                        count_as_restart=False,
+                    )
+                    runtime = self.get_runtime_state(state)
+                    runtime["last_schedule_result"] = (
+                        "started" if started else "skipped_disabled"
+                    )
+                    self.advance_schedule_date(runtime)
+                    self.save_state(state)
+
+                if bool(control.get("auto_restart_on_stale", False)):
+                    pending_reason = self.get_pending_restart_reason(
+                        runtime, remote_runtime, control, task
+                    )
+                    if pending_reason:
+                        if self.should_defer_auto_restart_until_schedule(runtime, control):
+                            print_line(
+                                f"[AGENT] auto restart deferred until schedule: pending={pending_reason} next_date={runtime.get('next_schedule_date', '-') or '-'} schedule={control.get('schedule_daily_start', '-') or '-'} session_date={runtime.get('session_date', '-') or '-'}"
                             )
                         else:
-                            print_line(
-                                f"[AGENT] 自动重启已触发({pending_reason})，但当前阻塞: {block_reason}"
+                            block_reason = self.get_auto_restart_block_reason(
+                                runtime, control
                             )
-            time.sleep(self.control_poll_seconds)
+                            if not block_reason:
+                                self.touch_agent_loop(
+                                    state, phase=f"auto_restart:{pending_reason}"
+                                )
+                                self.start_session(
+                                    state,
+                                    reason=pending_reason,
+                                    use_sync=False,
+                                    count_as_restart=True,
+                                )
+                            else:
+                                print_line(
+                                    f"[AGENT] 自动重启已触发({pending_reason})，但当前阻塞: {block_reason}"
+                                )
+                time.sleep(self.control_poll_seconds)
+            except Exception as exc:
+                previous_phase = ""
+                try:
+                    state = self.normalize_state_for_agent(self.load_state())
+                    previous_phase = str(
+                        self.get_runtime_state(state).get("agent_phase", "") or ""
+                    ).strip()
+                    self.touch_agent_loop(state, phase="loop_error")
+                except Exception:
+                    pass
+                phase_hint = f" phase={previous_phase}" if previous_phase else ""
+                print_line(
+                    f"[AGENT] 常驻循环异常，已保活并重试，将在 {self.control_poll_seconds} 秒后继续:{phase_hint} {type(exc).__name__}: {exc}"
+                )
+                time.sleep(self.control_poll_seconds)
 
     def do_run(self) -> None:
         self.start_session(

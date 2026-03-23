@@ -1,4 +1,5 @@
 import json
+import json
 import locale
 import os
 import subprocess
@@ -100,7 +101,7 @@ class GameToolGui:
         self.header_agent_id_var = tk.StringVar(value="-")
 
         self.summary_vars: Dict[str, tk.StringVar] = {}
-        core.print_line = lambda message: self._schedule_log(str(message))
+        core.print_line = self._forward_core_log
         self.config_window: Optional[ConfigEditorWindow] = None
         self._build_ui()
         self._schedule_log("GUI 已就绪")
@@ -201,7 +202,7 @@ class GameToolGui:
         )
         quick_actions = ttk.Frame(quick_bar)
         quick_actions.grid(row=1, column=1, sticky="w", pady=(4, 0))
-        for idx in range(6):
+        for idx in range(7):
             quick_actions.columnconfigure(idx, weight=0)
         ttk.Button(
             quick_actions,
@@ -233,6 +234,11 @@ class GameToolGui:
             text="account 目录",
             command=self.open_account_dir,
         ).grid(row=0, column=5, sticky="w")
+        ttk.Button(
+            quick_actions,
+            text="agent.log",
+            command=self.open_agent_log,
+        ).grid(row=0, column=6, padx=(8, 0), sticky="w")
 
         overview_host = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         overview_host.grid(row=2, column=0, sticky="nsew")
@@ -304,6 +310,8 @@ class GameToolGui:
             [
                 ("本地状态", "local_status"),
                 ("状态说明", "local_status_detail"),
+                ("Agent状态", "agent_health"),
+                ("Agent说明", "agent_health_detail"),
                 ("Session Active", "session_active"),
                 ("千年进程", "qiannian_running"),
                 ("本地心跳", "last_heartbeat_time"),
@@ -318,6 +326,7 @@ class GameToolGui:
             ],
             wraplength=380,
             wrap_max_by_key={
+                "agent_health_detail": 320,
                 "local_status_detail": 320,
                 "local_progress_evidence": 320,
             },
@@ -613,6 +622,11 @@ class GameToolGui:
     def _schedule_log(self, message: str) -> None:
         self.root.after(0, self._append_log, repair_text(message))
 
+    def _forward_core_log(self, message: str) -> None:
+        text = str(message)
+        core.append_agent_log(text)
+        self._schedule_log(text)
+
     def _set_var(self, key: str, value: Any) -> None:
         display = "-" if value in (None, "") else repair_text(value)
         self.summary_vars[key].set(display)
@@ -786,6 +800,9 @@ class GameToolGui:
                 hints.append(
                     f"本地 status.ini 已到 group={local_group}，report 结果仍是 {remote_group}；通常表示当前组尚未完成，属于正常中间态。"
                 )
+        seen_groups = [
+            value for value in [local_group, remote_group, heartbeat_group] if value > 0
+        ]
         if heartbeat_group > 0 and remote_group > 0 and heartbeat_group != remote_group:
             if remote_group > heartbeat_group and result_code == "fresh":
                 hints.append(
@@ -795,6 +812,11 @@ class GameToolGui:
                 hints.append(
                     f"heartbeat 证据已到 group={heartbeat_group}，结果上报仍是 group={remote_group}；说明当前组可能仍在执行中。"
                 )
+        if len(set(seen_groups)) >= 2:
+            comparison_parts.append("restart续跑=本地status.ini")
+            hints.append(
+                f"【重启判定】发生链路分叉时，restart 续跑以本地 status.ini 为准；当前 本地={local_group or '-'} / 结果={remote_group or '-'} / heartbeat={heartbeat_group or '-'}，不要按远端 heartbeat 直接判断续跑组号。"
+            )
         if not hints and result_code == "completed":
             hints.append(
                 "本轮任务已完成，等待下一次计划或新的协助任务。"
@@ -807,6 +829,63 @@ class GameToolGui:
             "comparison": " ； ".join(comparison_parts) if comparison_parts else "-",
             "hint": " ".join(hints) if hints else "-",
         }
+    def _build_agent_health(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        runtime = snapshot.get("runtime", {})
+        control = snapshot.get("control", {})
+        agent_processes = snapshot.get("agent_processes", [])
+        qiannian_running = bool(snapshot.get("qiannian_running", False))
+        threshold = max(
+            60,
+            core.parse_int(snapshot.get("agent_alive_threshold_seconds"), 180),
+        )
+        last_loop_epoch = core.parse_int(runtime.get("last_agent_loop_epoch"), 0)
+        last_loop_time = str(runtime.get("last_agent_loop_time", "") or "").strip()
+        agent_phase = str(runtime.get("agent_phase", "") or "").strip()
+        schedule_text = str(
+            control.get("schedule_daily_start")
+            or runtime.get("schedule_daily_start")
+            or ""
+        ).strip()
+        next_schedule_date = str(runtime.get("next_schedule_date", "") or "").strip()
+        desired_run_state = (
+            str(control.get("desired_run_state", "run")).strip().lower() or "run"
+        )
+        session_active = bool(runtime.get("session_active", False))
+        has_agent_history = bool(last_loop_time or next_schedule_date or schedule_text)
+        if agent_processes:
+            stale_seconds = (
+                int(time.time()) - last_loop_epoch if last_loop_epoch > 0 else 0
+            )
+            if last_loop_epoch > 0 and stale_seconds > threshold:
+                detail = (
+                    f"检测到 agent 进程仍在，但后台循环已超过 {stale_seconds} 秒未刷新"
+                )
+                if last_loop_time:
+                    detail += f"；最近轮询 {last_loop_time}"
+                if agent_phase:
+                    detail += f"；阶段 {agent_phase}"
+                return {"status": "可能卡住", "detail": detail}
+            detail = "agent 正在后台运行"
+            if last_loop_time:
+                detail += f"；最近轮询 {last_loop_time}"
+            if agent_phase:
+                detail += f"；阶段 {agent_phase}"
+            return {"status": "在线", "detail": detail}
+        if desired_run_state == "stop" and not session_active and not qiannian_running:
+            return {"status": "已停止", "detail": "远端当前为停止状态，未运行 agent"}
+        if has_agent_history or session_active or qiannian_running:
+            detail_parts = ["未检测到 agent 进程"]
+            if last_loop_time:
+                detail_parts.append(f"最近轮询 {last_loop_time}")
+            if agent_phase:
+                detail_parts.append(f"最近阶段 {agent_phase}")
+            if next_schedule_date:
+                detail_parts.append(f"下次计划 {next_schedule_date}")
+            elif schedule_text:
+                detail_parts.append(f"计划时间 {schedule_text}")
+            return {"status": "掉线", "detail": "；".join(detail_parts)}
+        return {"status": "未启动", "detail": "当前未检测到 agent 常驻进程"}
+
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         task = snapshot.get("task", {})
         control = snapshot.get("control", {})
@@ -825,6 +904,7 @@ class GameToolGui:
         )
         profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
         insight = self._build_evidence_insight(snapshot)
+        agent_health = self._build_agent_health(snapshot)
 
         assist_summary = assist.get("summary", "") if isinstance(assist, dict) else ""
         self.assist_status_var.set(
@@ -865,6 +945,8 @@ class GameToolGui:
 
         self._set_var("local_status", runtime.get("status", "-"))
         self._set_var("local_status_detail", snapshot.get("local_status_detail", "-"))
+        self._set_var("agent_health", agent_health.get("status", "-"))
+        self._set_var("agent_health_detail", agent_health.get("detail", "-"))
         self._set_var("session_active", bool(runtime.get("session_active", False)))
         self._set_var("next_schedule_date", runtime.get("next_schedule_date", "-"))
         self._set_var("last_launch_time", runtime.get("last_launch_time", "-"))
@@ -874,7 +956,7 @@ class GameToolGui:
         self._set_var(
             "agent_process",
             (
-                f"running ({', '.join(str(item.get('ProcessId')) for item in agent_processes)})"
+                f"running ({', '.join(str(item.get('pid')) for item in agent_processes)})"
                 if agent_processes
                 else "not running"
             ),
@@ -1073,6 +1155,17 @@ class GameToolGui:
             "pending_restart_reason": pending_restart_reason,
             "control_error": control_error,
             "agent_processes": self._find_agent_processes(),
+            "agent_alive_threshold_seconds": max(
+                180,
+                tool.control_poll_seconds * 4,
+                tool.process_stop_timeout_seconds
+                + tool.window_find_timeout_seconds
+                + tool.launch_ready_seconds
+                + tool.post_load_delay_seconds
+                + tool.load_confirm_timeout_seconds
+                + tool.launch_settle_seconds
+                + tool.window_cleanup_timeout_seconds,
+            ),
             "qiannian_running": qiannian_running,
         }
 
@@ -1162,6 +1255,46 @@ class GameToolGui:
     def _find_agent_processes(self) -> List[Dict[str, Any]]:
         if os.name != "nt":
             return []
+        command = [
+            "powershell.exe",
+            "-Command",
+            "$ErrorActionPreference='SilentlyContinue'; "
+            "$items = Get-CimInstance Win32_Process | Where-Object { "
+            "($_.Name -ieq 'game_tool.exe') -or "
+            "((($_.Name -ieq 'python.exe') -or ($_.Name -ieq 'pythonw.exe')) -and ([string]$_.CommandLine -match 'game_tool\\.py\"?\\s+agent')) "
+            "} | Select-Object @{Name='pid';Expression={$_.ProcessId}}, @{Name='name';Expression={$_.Name}}, @{Name='command_line';Expression={$_.CommandLine}}; "
+            "if ($items) { $items | ConvertTo-Json -Compress }",
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(core.SCRIPT_DIR),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=CREATE_NO_WINDOW,
+                check=False,
+            )
+            raw = str(completed.stdout or "").strip()
+            if raw:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    parsed = [parsed]
+                if isinstance(parsed, list):
+                    return [
+                        {
+                            "pid": core.parse_int(item.get("pid"), 0),
+                            "name": str(item.get("name", "") or "").strip(),
+                            "command_line": str(
+                                item.get("command_line", "") or ""
+                            ).strip(),
+                        }
+                        for item in parsed
+                        if core.parse_int(item.get("pid"), 0) > 0
+                    ]
+        except Exception:
+            pass
         tool = core.GameTool(core.load_config())
         results: List[Dict[str, Any]] = []
         for pid in tool.list_process_pids("game_tool.exe"):
@@ -1187,6 +1320,28 @@ class GameToolGui:
                 self._schedule_log(f"已终止 agent 进程 pid={pid}")
         return killed
 
+    
+    def _spawn_agent_process(self) -> None:
+        cmd = self._build_cli_command("agent")
+        subprocess.Popen(
+            cmd,
+            cwd=str(core.SCRIPT_DIR),
+            creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _wait_for_agent_processes(
+        self, timeout_seconds: int = 15
+    ) -> List[Dict[str, Any]]:
+        deadline = time.time() + max(1, timeout_seconds)
+        while time.time() < deadline:
+            processes = self._find_agent_processes()
+            if processes:
+                return processes
+            time.sleep(0.5)
+        return []
+
     def start_agent(self) -> None:
         if self.agent_launching:
             return
@@ -1196,14 +1351,7 @@ class GameToolGui:
             processes = self._find_agent_processes()
             if processes:
                 raise RuntimeError("检测到 agent 已在运行，请先停止旧 agent 再重新启动")
-            cmd = self._build_cli_command("agent")
-            subprocess.Popen(
-                cmd,
-                cwd=str(core.SCRIPT_DIR),
-                creationflags=CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._spawn_agent_process()
             self._schedule_log("已在后台启动 agent")
 
         def wrapped() -> None:
@@ -1223,14 +1371,7 @@ class GameToolGui:
                 raise RuntimeError(
                     "skip-today 执行后检测到 agent 已在运行，请先停止旧 agent"
                 )
-            cmd = self._build_cli_command("agent")
-            subprocess.Popen(
-                cmd,
-                cwd=str(core.SCRIPT_DIR),
-                creationflags=CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._spawn_agent_process()
             self._schedule_log("已执行 skip-today 并在后台启动 agent")
 
         self._run_background_action("跳过今天并启动", action)
@@ -1296,6 +1437,9 @@ class GameToolGui:
         tool = self._create_tool()
         self._open_path(tool.bootstrap_file, "bootstrap.json")
 
+    def open_agent_log(self) -> None:
+        self._open_path(core.AGENT_LOG_FILE, "agent.log")
+
     def open_qiannian_dir(self) -> None:
         tool = self._create_tool()
         self._open_path(tool.get_launch_base_dir(), "QianNian 目录")
@@ -1308,7 +1452,26 @@ class GameToolGui:
         self._run_background_action("立即同步配置", lambda: self._run_cli_once("sync"))
 
     def run_once(self) -> None:
-        self._run_background_action("同步并运行一次", lambda: self._run_cli_once("run"))
+        def action() -> None:
+            processes = self._find_agent_processes()
+            if processes:
+                self._schedule_log("检测到 agent 正在运行，改为委托 agent 执行“同步并运行一次”")
+            else:
+                self._schedule_log("未检测到 agent，先在后台拉起 agent，再委托执行")
+                self._spawn_agent_process()
+                processes = self._wait_for_agent_processes(timeout_seconds=15)
+                if not processes:
+                    raise RuntimeError("已尝试拉起 agent，但在 15 秒内未检测到 agent 进程")
+                self._schedule_log("agent 已启动，继续委托本次同步并运行一次")
+            tool = self._create_tool()
+            request = tool.enqueue_local_agent_action(
+                "sync_run_once", source="gui.run_once"
+            )
+            self._schedule_log(
+                f"已提交本地请求给 agent: action={request.get('action')} seq={request.get('seq')}"
+            )
+
+        self._run_background_action("同步并运行一次", action)
 
     def on_close(self) -> None:
         if messagebox.askyesno(
