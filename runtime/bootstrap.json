@@ -1,38 +1,46 @@
 {
   "ok": true,
-  "server_time": "2026-03-14 13:21:18",
+  "server_time": "2026-03-22 07:34:01",
   "agent_id": "VM-3-2",
   "profile_version": "2026-03-12 20:30:31",
   "task": {
     "enabled": true,
     "region": "103",
-    "group_start": 10,
+    "group_start": 3,
     "group_end": 35,
+    "profile_group_start": 3,
+    "profile_group_end": 35,
     "task_mode": "normal",
     "priority": 0,
-    "notes": ""
+    "notes": "",
+    "assist": {
+      "active": false,
+      "role": "",
+      "summary": ""
+    }
   },
   "control": {
     "desired_run_state": "run",
-    "schedule_daily_start": "",
+    "schedule_daily_start": "11:40",
     "auto_restart_on_stale": true,
     "restart_cooldown_seconds": 600,
     "max_restart_per_day": 3,
     "startup_grace_seconds": 300,
+    "complete_role_index": 5,
     "desired_action": "",
     "action_seq": 0
   },
   "config": {
     "version": "",
-    "payload_text": "{\n  \"qiannian_ui\": {\n    \"launch_button\": \"none\",\n    \"selorder\": 2,\n    \"checkboxes\": {\n      \"trade_setting\": false,\n      \"gumu_exit\": true,\n      \"log_file\": true,\n      \"log_detail\": false\n    }\n  }\n}",
+    "payload_text": "{\n  \"qiannian_ui\": {\n    \"launch_button\": \"gongzi\",\n    \"selorder\": 0,\n    \"checkboxes\": {\n      \"trade_setting\": false,\n      \"gumu_exit\": true,\n      \"log_file\": false,\n      \"log_detail\": false\n    }\n  }\n}",
     "payload_json": {
       "qiannian_ui": {
-        "launch_button": "none",
-        "selorder": 2,
+        "launch_button": "gongzi",
+        "selorder": 0,
         "checkboxes": {
           "trade_setting": false,
           "gumu_exit": true,
-          "log_file": true,
+          "log_file": false,
           "log_detail": false
         }
       }
@@ -43,6 +51,11 @@
     "startup_args": "",
     "script_entry": ""
   },
+  "assist": {
+    "active": false,
+    "role": "",
+    "summary": ""
+  },
   "downloads": {
     "exe": {
       "version": "",
@@ -52,23 +65,9 @@
     "resources_manifest": {
       "version": "",
       "url": "http://127.0.0.1:18080/api/resources/manifest?agent_id=VM-3-2",
-      "count": 1
+      "count": 0
     }
   },
-  "resources": [
-    {
-      "name": "config.txt",
-      "enabled": true,
-      "kind": "config",
-      "version": "2026-03-12 20:35:05",
-      "target_path": "runtime/config.txt",
-      "url": "http://127.0.0.1:9001/config.txt",
-      "sha256": "",
-      "size_bytes": 0,
-      "target_agents": [],
-      "notes": "",
-      "updated_at": "2026-03-12 20:35:05"
-    }
-  ],
-  "updated_at": "2026-03-14 13:20:58"
+  "resources": [],
+  "updated_at": "2026-03-17 12:41:46"
 }

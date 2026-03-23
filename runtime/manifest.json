@@ -1,21 +1,7 @@
 {
   "ok": true,
-  "server_time": "2026-03-14 13:21:18",
+  "server_time": "2026-03-22 07:34:01",
   "agent_id": "VM-3-2",
-  "count": 1,
-  "items": [
-    {
-      "name": "config.txt",
-      "enabled": true,
-      "kind": "config",
-      "version": "2026-03-12 20:35:05",
-      "target_path": "runtime/config.txt",
-      "url": "http://127.0.0.1:9001/config.txt",
-      "sha256": "",
-      "size_bytes": 0,
-      "target_agents": [],
-      "notes": "",
-      "updated_at": "2026-03-12 20:35:05"
-    }
-  ]
+  "count": 0,
+  "items": []
 }

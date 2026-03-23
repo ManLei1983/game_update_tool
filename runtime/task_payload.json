@@ -1,11 +1,11 @@
 {
   "qiannian_ui": {
-    "launch_button": "none",
-    "selorder": 2,
+    "launch_button": "gongzi",
+    "selorder": 0,
     "checkboxes": {
       "trade_setting": false,
       "gumu_exit": true,
-      "log_file": true,
+      "log_file": false,
       "log_detail": false
     }
   }

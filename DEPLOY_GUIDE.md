@@ -54,3 +54,19 @@ powershell -ExecutionPolicy Bypass -File .\generate_vm_config.ps1 `
 - `ExePath`
 
 ??????????
+
+
+## GUI Control Panel
+- `game_tool_gui.exe`: minimal local control panel
+- `run_gui.bat`: open the control panel
+
+Recommended usage on each VM:
+1. Open `run_gui.bat`
+2. Click `????`
+3. If this VM should continue today's unfinished work, click `?? Agent`
+4. If today's work was finished on another machine and this VM should wait for tomorrow, click `???????`
+
+Notes:
+- `?? Agent` may resume today's unfinished progress immediately.
+- `???????` will mark today as skipped locally and wait for the next schedule.
+- `?? Agent` will stop the local agent process and also issue a stop for qiannian.

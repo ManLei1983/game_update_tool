@@ -1,37 +1,31 @@
 {
-  "resources": {
-    "hello.txt": {
-      "version": "2026-03-12 20:25:43",
-      "target_path": "D:\\MyProjects\\Python_Projects\\my_tools\\game_update_tool\\runtime\\hello.txt",
-      "updated_at": "2026-03-12 20:28:08"
-    },
-    "config.txt": {
-      "version": "2026-03-12 20:35:05",
-      "target_path": "D:\\MyProjects\\Python_Projects\\my_tools\\game_update_tool\\runtime\\config.txt",
-      "updated_at": "2026-03-12 20:35:14"
-    }
-  },
   "agent_id": "VM-3-2",
-  "profile_version": "2026-03-12 20:25:22",
+  "agent_runtime": {
+    "restart_count_date": "2026-03-22",
+    "restart_count_today": 0,
+    "last_control_time": "2026-03-22 07:36:20",
+    "last_control_ok": true,
+    "last_control_error": "",
+    "last_control_error_kind": "",
+    "control_error_streak": 0,
+    "last_server_time": "2026-03-22 07:36:20",
+    "last_remote_stale": false,
+    "last_remote_has_report": true,
+    "last_remote_completed": false,
+    "last_local_completed": false,
+    "last_local_group": 21,
+    "last_local_role_index": 0,
+    "last_local_status_date": "2026-03-21",
+    "last_local_target_group_end": 35,
+    "last_local_complete_role_index": 5,
+    "last_seen_report_time": "2026-03-22 07:36:20",
+    "last_seen_report_elapsed": 0,
+    "last_seen_group": 22,
+    "last_seen_role_index": 1
+  },
+  "resources": {},
+  "profile_version": "2026-03-12 20:30:31",
   "config_version": "",
   "manifest_version": "",
-  "last_sync_time": "2026-03-12 20:35:14",
-  "agent_runtime": {
-    "last_stop_reason": "pre-start:manual_restart",
-    "last_stop_time": "2026-03-14 23:16:15",
-    "last_pid": 48424,
-    "status": "running",
-    "session_active": true,
-    "session_date": "2026-03-14",
-    "last_launch_time": "2026-03-14 23:16:40",
-    "last_launch_epoch": 1773501400,
-    "last_launch_reason": "manual_restart",
-    "last_seen_report_time": "",
-    "last_seen_stale": false,
-    "restart_count_date": "2026-03-15",
-    "restart_count_today": 0,
-    "last_restart_time": "2026-03-14 23:16:40",
-    "last_restart_epoch": 1773501400,
-    "last_restart_reason": "manual_restart"
-  }
+  "last_sync_time": "2026-03-22 07:34:01"
 }
