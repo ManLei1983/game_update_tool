@@ -948,6 +948,10 @@ class GameTool:
             "intent_reason": "",
             "intent_at": "",
             "intent_epoch": 0,
+            "session_group_start": 0,
+            "session_group_end": 0,
+            "session_role_index": 0,
+            "session_task_label": "",
             "resume_task_fingerprint": "",
             "resume_task_kind": "",
             "resume_task_label": "",
@@ -1224,6 +1228,9 @@ class GameTool:
         )
         print_line(
             f"Local Completion: completed={bool(runtime.get('last_local_completed', False))} group={runtime.get('last_local_group', '-')} role_index={runtime.get('last_local_role_index', '-')} target_group_end={runtime.get('last_local_target_group_end', '-')} complete_role_index={runtime.get('last_local_complete_role_index', '-')} date={runtime.get('last_local_status_date', '-') or '-'}"
+        )
+        print_line(
+            f"Session Boundary: group_start={runtime.get('session_group_start', '-')} group_end={runtime.get('session_group_end', '-')} role_index={runtime.get('session_role_index', '-')} task={runtime.get('session_task_label', '-') or '-'}"
         )
         print_line(
             f"Remote Snapshot: has_report={bool(runtime.get('last_remote_has_report', False))} stale={bool(runtime.get('last_remote_stale', False))} completed={bool(runtime.get('last_remote_completed', False))}"
@@ -1877,6 +1884,10 @@ class GameTool:
             runtime["last_pid"] = 0
             if clear_session:
                 runtime["session_active"] = False
+                runtime["session_group_start"] = 0
+                runtime["session_group_end"] = 0
+                runtime["session_role_index"] = 0
+                runtime["session_task_label"] = ""
             self.save_state(state)
         if stopped:
             print_line(f"[STOP] 已关闭 qiannian, reason={reason}")
@@ -1905,6 +1916,41 @@ class GameTool:
             if parsed > 0:
                 return parsed
         return default
+
+    def build_effective_bootstrap(
+        self,
+        bootstrap: Dict[str, Any],
+        control_doc: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        merged = dict(bootstrap) if isinstance(bootstrap, dict) else {}
+        base_task = merged.get("task", {})
+        base_control = merged.get("control", {})
+        merged["task"] = dict(base_task) if isinstance(base_task, dict) else {}
+        merged["control"] = (
+            dict(base_control) if isinstance(base_control, dict) else {}
+        )
+        base_assist = merged.get("assist", {})
+        merged["assist"] = dict(base_assist) if isinstance(base_assist, dict) else {}
+
+        if not isinstance(control_doc, dict) or not control_doc:
+            return merged
+
+        live_task = control_doc.get("task", {})
+        if isinstance(live_task, dict) and live_task:
+            merged["task"] = dict(live_task)
+
+        live_control = control_doc.get("control", {})
+        if isinstance(live_control, dict) and live_control:
+            merged["control"] = dict(live_control)
+
+        live_assist = control_doc.get("assist", {})
+        if isinstance(live_assist, dict) and live_assist:
+            merged["assist"] = dict(live_assist)
+            task_assist = merged["task"].get("assist")
+            if not isinstance(task_assist, dict):
+                merged["task"]["assist"] = dict(live_assist)
+
+        return merged
 
     def get_launch_base_dir(self) -> Path:
         try:
@@ -2762,14 +2808,23 @@ class GameTool:
         return self.do_sync() if use_sync else self.load_cached_bootstrap()
 
     def start_session(
-        self, state: Dict[str, Any], reason: str, use_sync: bool, count_as_restart: bool
+        self,
+        state: Dict[str, Any],
+        reason: str,
+        use_sync: bool,
+        count_as_restart: bool,
+        control_doc: Optional[Dict[str, Any]] = None,
     ) -> bool:
         self.mark_agent_phase(
             state,
             f"start_session:{reason}:prepare_bootstrap",
             f"[STEP] start_session begin: reason={reason} use_sync={use_sync} count_as_restart={count_as_restart}",
         )
-        bootstrap = self.prepare_bootstrap(use_sync=use_sync)
+        cached_bootstrap = self.prepare_bootstrap(use_sync=use_sync)
+        bootstrap = self.build_effective_bootstrap(
+            cached_bootstrap,
+            control_doc=control_doc,
+        )
         task = (
             bootstrap.get("task", {})
             if isinstance(bootstrap.get("task", {}), dict)
@@ -2781,6 +2836,18 @@ class GameTool:
             else {}
         )
         runtime = self.get_runtime_state(state)
+
+        cached_task = (
+            cached_bootstrap.get("task", {})
+            if isinstance(cached_bootstrap.get("task", {}), dict)
+            else {}
+        )
+        cached_group_end = parse_int(cached_task.get("group_end"), 0)
+        live_group_end = parse_int(task.get("group_end"), 0)
+        if live_group_end != cached_group_end:
+            print_line(
+                f"[AGENT] start_session 使用 live task 边界: cached_group_end={cached_group_end} live_group_end={live_group_end} reason={reason}"
+            )
 
         if str(control.get("desired_run_state", "run")).strip().lower() == "stop":
             print_line(f"[AGENT] desired_run_state=stop, skip start, reason={reason}")
@@ -2898,6 +2965,12 @@ class GameTool:
         runtime["status"] = "running"
         runtime["session_active"] = True
         runtime["session_date"] = today_str()
+        runtime["session_group_start"] = parse_int(applied_plan.get("group_start"), 0)
+        runtime["session_group_end"] = parse_int(applied_plan.get("group_end"), 0)
+        runtime["session_role_index"] = parse_int(applied_plan.get("role_index"), 0)
+        runtime["session_task_label"] = str(
+            resume_state.get("current_task_label", "") or ""
+        ).strip()
         runtime["last_launch_time"] = now_str()
         runtime["last_launch_epoch"] = int(time.time())
         runtime["last_launch_reason"] = reason
@@ -3292,12 +3365,22 @@ class GameTool:
         assist = task.get("assist", {}) if isinstance(task.get("assist", {}), dict) else {}
         assist_active = bool(assist.get("active", False))
         assist_role = str(assist.get("role", "") or "").strip().lower()
+        session_group_end = parse_int(runtime.get("session_group_end"), 0)
         current_group = parse_int(local_completion.get("current_group"), 0)
         role_index = parse_int(local_completion.get("role_index"), 0)
         target_group_end = parse_int(local_completion.get("target_group_end"), 0)
         complete_role_index = parse_int(local_completion.get("complete_role_index"), 0)
+        boundary_shrunk = (
+            session_group_end > 0
+            and target_group_end > 0
+            and target_group_end < session_group_end
+        )
 
-        reason_parts = ["task_completed"]
+        reason_parts = [
+            "task_boundary_shrunk"
+            if boundary_shrunk and local_completed
+            else "task_completed"
+        ]
         if assist_active:
             reason_parts.append(f"assist_{assist_role or 'active'}")
         reason_parts.append("local" if local_completed else "remote")
@@ -3306,7 +3389,8 @@ class GameTool:
         print_line(
             f"[AGENT] task completed, stop qiannian: reason={stop_reason} "
             f"current_group={current_group} role_index={role_index} "
-            f"target_group_end={target_group_end} complete_role_index={complete_role_index}"
+            f"target_group_end={target_group_end} complete_role_index={complete_role_index} "
+            f"session_group_end={session_group_end}"
         )
         self.stop_qiannian(state, reason=stop_reason, clear_session=True)
         runtime = self.get_runtime_state(state)
@@ -3345,6 +3429,7 @@ class GameTool:
                 reason="action:restart_once",
                 use_sync=False,
                 count_as_restart=True,
+                control_doc=control_doc,
             )
         elif action == "stop_once":
             self.stop_qiannian(state, reason="action:stop_once", clear_session=True)
@@ -3541,6 +3626,7 @@ class GameTool:
                         reason="daily_rollover",
                         use_sync=False,
                         count_as_restart=False,
+                        control_doc=control_doc,
                     ):
                         runtime = self.get_runtime_state(state)
                         runtime["last_schedule_date"] = today_str()
@@ -3571,6 +3657,7 @@ class GameTool:
                         reason="resume_pending_session",
                         use_sync=False,
                         count_as_restart=True,
+                        control_doc=control_doc,
                     )
                     time.sleep(self.control_poll_seconds)
                     continue
@@ -3582,6 +3669,7 @@ class GameTool:
                         reason="daily_schedule",
                         use_sync=False,
                         count_as_restart=False,
+                        control_doc=control_doc,
                     )
                     runtime = self.get_runtime_state(state)
                     runtime["last_schedule_result"] = (
@@ -3612,6 +3700,7 @@ class GameTool:
                                     reason=pending_reason,
                                     use_sync=False,
                                     count_as_restart=True,
+                                    control_doc=control_doc,
                                 )
                             else:
                                 print_line(
@@ -3643,11 +3732,17 @@ class GameTool:
         )
 
     def do_restart(self) -> None:
+        control_doc: Optional[Dict[str, Any]] = None
+        try:
+            control_doc = self.fetch_control()
+        except Exception as exc:
+            print_line(f"[RESTART] 拉取 live control 失败，继续使用本地缓存: {exc}")
         self.start_session(
             self.normalize_state_for_agent(self.load_state()),
             reason="manual_restart",
             use_sync=False,
             count_as_restart=True,
+            control_doc=control_doc,
         )
 
 
