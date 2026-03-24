@@ -1603,6 +1603,24 @@ class GameTool:
         self.exe_path = new_exe_path
         self.persist_runtime_config()
 
+    def build_resource_signature(
+        self, item: Dict[str, Any], target_path: Path
+    ) -> str:
+        return "|".join(
+            [
+                f"kind={str(item.get('kind', '')).strip().lower()}",
+                f"target_path={target_path}",
+                f"url={str(item.get('url', '')).strip()}",
+                f"sha256={str(item.get('sha256', '')).strip().lower()}",
+                f"ini_section={str(item.get('ini_section', '')).strip()}",
+                f"ini_key={str(item.get('ini_key', '')).strip()}",
+                f"ini_value={str(item.get('ini_value', ''))}",
+                f"text_key={str(item.get('text_key', '')).strip()}",
+                f"text_line={str(item.get('text_line', '')).strip()}",
+                f"append_comment={str(item.get('append_comment', '')).strip()}",
+            ]
+        )
+
     def record_resource_state(
         self,
         resource_state: Dict[str, Any],
@@ -1610,13 +1628,54 @@ class GameTool:
         version: str,
         target_path: Path,
         kind: str,
+        item: Optional[Dict[str, Any]] = None,
     ) -> None:
-        resource_state[name] = {
+        state_entry = {
             "version": version,
             "target_path": str(target_path),
             "kind": kind,
             "updated_at": now_str(),
         }
+        if item is not None:
+            state_entry["signature"] = self.build_resource_signature(item, target_path)
+        resource_state[name] = state_entry
+
+    def should_skip_resource_item(
+        self,
+        resource_state: Dict[str, Any],
+        item: Dict[str, Any],
+        target_path: Path,
+        name: str,
+        kind: str,
+        version: str,
+    ) -> bool:
+        if not target_path.exists() or not version:
+            return False
+
+        previous_state = resource_state.get(name, {})
+        old_version = str(previous_state.get("version", "")).strip()
+        if old_version != version:
+            return False
+
+        current_signature = self.build_resource_signature(item, target_path)
+        old_signature = str(previous_state.get("signature", "")).strip()
+        if old_signature:
+            if old_signature == current_signature:
+                print_line(f"[SYNC] resource unchanged, skip: {name} ({version})")
+                return True
+            return False
+
+        old_target_path = str(previous_state.get("target_path", "")).strip()
+        old_kind = str(previous_state.get("kind", "")).strip().lower()
+        if old_target_path != str(target_path) or old_kind != kind:
+            return False
+
+        if kind in ("ini_value", "text_kv_line"):
+            print_line(f"[SYNC] resource state missing signature, reapply once: {name}")
+            return False
+
+        print_line(f"[SYNC] resource unchanged, skip: {name} ({version})")
+        return True
 
     def resolve_zip_bundle_root(self, staging_dir: Path) -> Path:
         children = [item for item in staging_dir.iterdir() if item.name != "__MACOSX"]
@@ -1644,7 +1703,14 @@ class GameTool:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             backup = backup_path(target_path, self.backups_dir)
             shutil.move(str(extracted_root), str(target_path))
-            self.record_resource_state(resource_state, name, version, target_path, "zip_bundle")
+            self.record_resource_state(
+                resource_state,
+                name,
+                version,
+                target_path,
+                "zip_bundle",
+                item,
+            )
             if backup:
                 print_line(f"[SYNC] 已备份旧目录 -> {backup}")
             print_line(f"[SYNC] 目录资源已更新 -> {target_path}")
@@ -1723,7 +1789,14 @@ class GameTool:
             raise RuntimeError(f"ini_value 缺少 section/key: {name}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         self.update_ini_value(target_path, section_name, key_name, value_text)
-        self.record_resource_state(resource_state, name, version, target_path, "ini_value")
+        self.record_resource_state(
+            resource_state,
+            name,
+            version,
+            target_path,
+            "ini_value",
+            item,
+        )
         print_line(f"[SYNC] INI 配置已更新 -> {target_path} [{section_name}] {key_name}")
 
     def update_text_kv_line(
@@ -1779,7 +1852,14 @@ class GameTool:
             raise RuntimeError(f"text_kv_line 缺少 text_key/text_line: {name}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
         self.update_text_kv_line(target_path, match_key, line_text, append_comment)
-        self.record_resource_state(resource_state, name, version, target_path, "text_kv_line")
+        self.record_resource_state(
+            resource_state,
+            name,
+            version,
+            target_path,
+            "text_kv_line",
+            item,
+        )
         print_line(f"[SYNC] 文本键值已更新 -> {target_path} key={match_key}")
 
     def sync_resource_items(
@@ -1810,9 +1890,14 @@ class GameTool:
                 continue
 
             target_path = self.resolve_resource_target_path(target_path_text)
-            old_version = str(resource_state.get(name, {}).get("version", ""))
-            if target_path.exists() and version and old_version == version:
-                print_line(f"[SYNC] 资源未变化，跳过: {name} ({version})")
+            if self.should_skip_resource_item(
+                resource_state,
+                item,
+                target_path,
+                name,
+                kind,
+                version,
+            ):
                 continue
 
             if kind == "ini_value":
@@ -1836,7 +1921,14 @@ class GameTool:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 backup = backup_file(target_path, self.backups_dir)
                 shutil.move(str(temp_file), str(target_path))
-                self.record_resource_state(resource_state, name, version, target_path, kind)
+                self.record_resource_state(
+                    resource_state,
+                    name,
+                    version,
+                    target_path,
+                    kind,
+                    item,
+                )
                 if backup:
                     print_line(f"[SYNC] 已备份旧文件 -> {backup}")
                 print_line(f"[SYNC] 资源已更新 -> {target_path}")
