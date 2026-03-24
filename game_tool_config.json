@@ -1,4 +1,4 @@
-﻿{
+{
   "server": {
     "base_url": "http://127.0.0.1:18080",
     "agent_id": "VM-3-2",
@@ -17,7 +17,7 @@
     "launch_file": "runtime/launch.json",
     "manifest_file": "runtime/manifest.json",
     "state_file": "cache/state.json",
-    "exe_path": "D:/MyProjects/VisualStudio_Projects/qiannian/Debug/QianNian3.9.1.exe"
+    "exe_path": "D:/MyProjects/VisualStudio_Projects/qiannian/Debug/QianNian3.23.1.exe"
   },
   "behavior": {
     "download_resources": true,
@@ -26,8 +26,33 @@
     "fail_on_missing_manifest": false,
     "control_poll_seconds": 5,
     "control_error_retry_seconds": 5,
+    "heartbeat_interval_seconds": 30,
+    "process_stop_timeout_seconds": 20,
+    "window_find_timeout_seconds": 60,
     "launch_ready_seconds": 10,
-    "post_load_delay_seconds": 5
+    "post_load_delay_seconds": 5,
+    "load_confirm_timeout_seconds": 3,
+    "launch_settle_seconds": 8,
+    "post_clear_game_delay_seconds": 5,
+    "startup_grace_seconds_fallback": 300
+  },
+  "qiannian": {
+    "ui_enabled": true,
+    "launch_button": "gongzi",
+    "control_ids": {
+      "region_combo": 1005,
+      "load_button": 1007,
+      "current_group_edit": 1008,
+      "max_group_edit": 1021,
+      "role_index_edit": 1016,
+      "start_button": 1002,
+      "runtask_button": 1013,
+      "gongzi_button": 1020,
+      "trade_setting_checkbox": 1018,
+      "gumu_exit_checkbox": 1022,
+      "log_file_checkbox": 1015,
+      "log_detail_checkbox": 1017
+    }
   },
   "window_cleanup": {
     "enabled": true,
@@ -45,7 +70,6 @@
         "window_class": "TFrmM",
         "window_title": ""
       }
-		
     ]
   }
 }

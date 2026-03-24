@@ -23,6 +23,13 @@ COMMON_CJK_HINTS = set(
     "的一是了在人有我他这中大来上个们到说国和地也子时道出而要于就下得可你年生自会那后能对着事其里所去行过家学用同控制面板刷新状态启动停止运行配置今天协助任务区服完成失败目标当前结束开始组日期计划本地远端错误重启进度时间跳过后台"
 )
 
+STATUS_COLORS = {
+    "ok": "#167c2b",
+    "warn": "#b26a00",
+    "error": "#c62828",
+    "muted": "#666666",
+}
+
 
 def _text_score(value: str) -> int:
     cjk_count = sum(1 for ch in value if "一" <= ch <= "鿿")
@@ -85,7 +92,7 @@ class GameToolGui:
         self.root = root
         self.root.title("game_tool 控制面板")
         self.root.geometry("1380x960")
-        self.root.minsize(1024, 768)
+        self.root.minsize(1180, 768)
 
         core.create_example_config()
         if not core.CONFIG_FILE.exists():
@@ -94,6 +101,7 @@ class GameToolGui:
         self.refresh_running = False
         self.refresh_after_id: Optional[str] = None
         self.agent_launching = False
+        self.last_state_warning = ""
         self.auto_refresh_var = tk.BooleanVar(value=True)
         self.refresh_interval_var = tk.IntVar(value=5)
         self.log_line_limit = 400
@@ -101,6 +109,15 @@ class GameToolGui:
         self.header_agent_id_var = tk.StringVar(value="-")
 
         self.summary_vars: Dict[str, tk.StringVar] = {}
+        self.startup_check_vars: Dict[str, tk.StringVar] = {}
+        self.startup_check_labels: Dict[str, tk.Label] = {}
+        self.startup_check_titles: Dict[str, str] = {
+            "config": "配置",
+            "state": "STATE",
+            "bootstrap": "BOOT",
+            "exe": "EXE",
+            "agent": "AGENT",
+        }
         core.print_line = self._forward_core_log
         self.config_window: Optional[ConfigEditorWindow] = None
         self._build_ui()
@@ -240,6 +257,35 @@ class GameToolGui:
             command=self.open_agent_log,
         ).grid(row=0, column=6, padx=(8, 0), sticky="w")
 
+        ttk.Label(quick_bar, text="启动自检").grid(
+            row=2, column=0, sticky="nw", padx=(0, 8), pady=(6, 0)
+        )
+        startup_checks = ttk.Frame(quick_bar)
+        startup_checks.grid(row=2, column=1, sticky="ew", pady=(6, 0))
+        for idx, (key, title) in enumerate(self.startup_check_titles.items()):
+            startup_checks.columnconfigure(idx, weight=1)
+            var = tk.StringVar(value=f"{title}: -")
+            self.startup_check_vars[key] = var
+            value_label = tk.Label(
+                startup_checks,
+                textvariable=var,
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=220,
+                padx=8,
+                pady=4,
+                bd=1,
+                relief=tk.GROOVE,
+                fg=STATUS_COLORS["muted"],
+            )
+            value_label.grid(
+                row=0,
+                column=idx,
+                sticky="ew",
+                padx=(0, 8) if idx < len(self.startup_check_titles) - 1 else (0, 0),
+            )
+            self.startup_check_labels[key] = value_label
+
         overview_host = ttk.Frame(self.root, padding=(12, 0, 12, 8))
         overview_host.grid(row=2, column=0, sticky="nsew")
         overview_host.columnconfigure(0, weight=1)
@@ -310,6 +356,7 @@ class GameToolGui:
             [
                 ("本地状态", "local_status"),
                 ("状态说明", "local_status_detail"),
+                ("STATE异常", "state_warning"),
                 ("Agent状态", "agent_health"),
                 ("Agent说明", "agent_health_detail"),
                 ("Session Active", "session_active"),
@@ -326,6 +373,7 @@ class GameToolGui:
             ],
             wraplength=380,
             wrap_max_by_key={
+                "state_warning": 320,
                 "agent_health_detail": 320,
                 "local_status_detail": 320,
                 "local_progress_evidence": 320,
@@ -631,6 +679,99 @@ class GameToolGui:
         display = "-" if value in (None, "") else repair_text(value)
         self.summary_vars[key].set(display)
 
+    def _set_startup_check(self, key: str, text: str, level: str) -> None:
+        title = self.startup_check_titles.get(key, key.upper())
+        display = f"{title}: {repair_text(text) if text else '-'}"
+        if key in self.startup_check_vars:
+            self.startup_check_vars[key].set(display)
+        if key in self.startup_check_labels:
+            self.startup_check_labels[key].configure(
+                fg=STATUS_COLORS.get(level, STATUS_COLORS["muted"])
+            )
+
+    def _inspect_exe_path(self, tool: core.GameTool) -> Dict[str, str]:
+        raw_path = str(tool.paths.get("exe_path", "") or "").strip()
+        if not raw_path:
+            return {"level": "error", "text": "未配置 exe_path"}
+        exe_path = tool.exe_path
+        if exe_path.exists() and exe_path.is_file():
+            return {"level": "ok", "text": f"存在: {exe_path.name}"}
+        if exe_path.exists():
+            return {"level": "error", "text": f"不是文件: {exe_path.name}"}
+        return {"level": "error", "text": f"不存在: {exe_path.name or exe_path}"}
+
+    def _inspect_bootstrap_file(self, tool: core.GameTool) -> Dict[str, str]:
+        if not tool.bootstrap_file.exists():
+            return {
+                "level": "warn",
+                "text": "缺失；定时启动前需先同步一次",
+            }
+        try:
+            bootstrap = core.load_json_file(tool.bootstrap_file, default={}) or {}
+        except Exception as exc:
+            return {"level": "error", "text": f"读取失败: {repair_text(str(exc))}"}
+        if not isinstance(bootstrap, dict) or not bootstrap:
+            return {"level": "error", "text": "文件为空或格式错误"}
+        bootstrap_agent_id = str(bootstrap.get("agent_id", "") or "").strip()
+        if bootstrap_agent_id and bootstrap_agent_id != tool.agent_id:
+            return {
+                "level": "error",
+                "text": f"agent 不一致: {bootstrap_agent_id}->{tool.agent_id}",
+            }
+        timestamp = str(
+            bootstrap.get("updated_at", "") or bootstrap.get("server_time", "") or ""
+        ).strip()
+        if timestamp:
+            return {"level": "ok", "text": f"已就绪: {timestamp}"}
+        return {"level": "ok", "text": "已就绪"}
+
+    def _render_startup_checks(
+        self, snapshot: Dict[str, Any], agent_health: Dict[str, str]
+    ) -> None:
+        agent_id = str(snapshot.get("agent_id", "") or "").strip()
+        base_url = str(snapshot.get("base_url", "") or "").strip()
+        state_warning = str(snapshot.get("state_warning", "") or "").strip()
+        state_file = str(snapshot.get("state_file", "") or "").strip()
+        bootstrap_check = snapshot.get("bootstrap_check", {})
+        exe_check = snapshot.get("exe_check", {})
+        agent_status = str(agent_health.get("status", "") or "").strip()
+
+        if not core.CONFIG_FILE.exists():
+            self._set_startup_check("config", "配置文件不存在", "error")
+        elif not agent_id:
+            self._set_startup_check("config", "agent_id 未填写", "error")
+        elif not base_url:
+            self._set_startup_check("config", "base_url 未填写", "error")
+        else:
+            self._set_startup_check("config", f"agent_id={agent_id}", "ok")
+
+        if state_warning:
+            self._set_startup_check("state", state_warning, "error")
+        elif state_file and Path(state_file).exists():
+            self._set_startup_check("state", "已初始化", "ok")
+        else:
+            self._set_startup_check("state", "待初始化", "warn")
+
+        self._set_startup_check(
+            "bootstrap",
+            str(bootstrap_check.get("text", "-") or "-"),
+            str(bootstrap_check.get("level", "muted") or "muted"),
+        )
+        self._set_startup_check(
+            "exe",
+            str(exe_check.get("text", "-") or "-"),
+            str(exe_check.get("level", "muted") or "muted"),
+        )
+
+        if agent_status == "在线":
+            self._set_startup_check("agent", "在线", "ok")
+        elif agent_status in {"未启动", "已停止", "可能卡住"}:
+            self._set_startup_check("agent", agent_status, "warn")
+        elif agent_status:
+            self._set_startup_check("agent", agent_status, "error")
+        else:
+            self._set_startup_check("agent", "未知", "muted")
+
     def _format_remote_state(self, payload: Dict[str, Any]) -> str:
         if not isinstance(payload, dict) or not payload:
             return "-"
@@ -682,9 +823,7 @@ class GameToolGui:
                 helper_ids.append(helper_agent_id)
             helper_label = "、".join(helper_ids) if helper_ids else "helper"
             if profile_end > current_end > 0:
-                note = (
-                    f"尾段已交给 {helper_label}：原结束组 {profile_end} -> 当前有效结束组 {current_end}"
-                )
+                note = f"尾段已交给 {helper_label}：原结束组 {profile_end} -> 当前有效结束组 {current_end}"
                 if delegate_start > 0 and delegate_end >= delegate_start:
                     note += f"；接手区间 {delegate_start}->{delegate_end}"
                 return note
@@ -748,14 +887,16 @@ class GameToolGui:
 
         comparison_parts: List[str] = []
         if supervision_label != "-" or result_label != "-":
-            comparison_parts.append(
-                f"监督={supervision_label} / 结果={result_label}"
-            )
+            comparison_parts.append(f"监督={supervision_label} / 结果={result_label}")
         if heartbeat_group > 0 or remote_group > 0 or local_group > 0:
             comparison_parts.append(
                 f"heartbeat={heartbeat_group or '-'} / report={remote_group or '-'} / 本地status={local_group or '-'}"
             )
-        if profile_group_end > 0 and current_group_end > 0 and profile_group_end != current_group_end:
+        if (
+            profile_group_end > 0
+            and current_group_end > 0
+            and profile_group_end != current_group_end
+        ):
             comparison_parts.append(
                 f"有效结束组={current_group_end} / 原结束组={profile_group_end}"
             )
@@ -770,7 +911,11 @@ class GameToolGui:
                 hints.append(
                     "local_report 当前不可达，且本地未检测到千年进程；先恢复 report 服务，再看启动链路。"
                 )
-        if assist_active and assist_role == "target" and profile_group_end > current_group_end > 0:
+        if (
+            assist_active
+            and assist_role == "target"
+            and profile_group_end > current_group_end > 0
+        ):
             hints.append(
                 f"当前尾段已外包：本机只应跑到 group={current_group_end}；原结束组 {profile_group_end} 之后的任务已交给 helper。"
             )
@@ -787,7 +932,10 @@ class GameToolGui:
                 hint += f"；协助段 {delegate_start}->{delegate_end}"
             hint += "；不要按本机原配置范围判断完成。"
             hints.append(hint)
-        if supervision_code in {"suspected_stuck", "startup_failed"} and result_code == "fresh":
+        if (
+            supervision_code in {"suspected_stuck", "startup_failed"}
+            and result_code == "fresh"
+        ):
             hints.append(
                 "结果链路仍在刷新，但监督链路已落后；优先检查 game_tool agent 是否常驻、heartbeat 是否持续上报。"
             )
@@ -818,17 +966,19 @@ class GameToolGui:
                 f"【重启判定】发生链路分叉时，restart 续跑以本地 status.ini 为准；当前 本地={local_group or '-'} / 结果={remote_group or '-'} / heartbeat={heartbeat_group or '-'}，不要按远端 heartbeat 直接判断续跑组号。"
             )
         if not hints and result_code == "completed":
-            hints.append(
-                "本轮任务已完成，等待下一次计划或新的协助任务。"
-            )
-        if not hints and not qiannian_running and local_group <= 0 and remote_group <= 0:
-            hints.append(
-                "当前未看到运行证据，等待计划时间或手动启动。"
-            )
+            hints.append("本轮任务已完成，等待下一次计划或新的协助任务。")
+        if (
+            not hints
+            and not qiannian_running
+            and local_group <= 0
+            and remote_group <= 0
+        ):
+            hints.append("当前未看到运行证据，等待计划时间或手动启动。")
         return {
             "comparison": " ； ".join(comparison_parts) if comparison_parts else "-",
             "hint": " ".join(hints) if hints else "-",
         }
+
     def _build_agent_health(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
         runtime = snapshot.get("runtime", {})
         control = snapshot.get("control", {})
@@ -898,6 +1048,7 @@ class GameToolGui:
         progress = snapshot.get("status_progress", {})
         agent_processes = snapshot.get("agent_processes", [])
         control_error = snapshot.get("control_error", "")
+        state_warning = str(snapshot.get("state_warning", "") or "").strip()
         assist = snapshot.get("assist", {})
         profile_group_start = task.get(
             "profile_group_start", task.get("group_start", "-")
@@ -905,15 +1056,11 @@ class GameToolGui:
         profile_group_end = task.get("profile_group_end", task.get("group_end", "-"))
         insight = self._build_evidence_insight(snapshot)
         agent_health = self._build_agent_health(snapshot)
+        self._render_startup_checks(snapshot, agent_health)
 
         assist_summary = assist.get("summary", "") if isinstance(assist, dict) else ""
         self.assist_status_var.set(
-            repair_text(
-                str(
-                    assist_summary
-                    or "当前未接到临时协助任务"
-                )
-            )
+            repair_text(str(assist_summary or "当前未接到临时协助任务"))
         )
         self._set_var("agent_id", snapshot.get("agent_id"))
         self._refresh_header_agent_id(snapshot.get("agent_id"))
@@ -933,18 +1080,16 @@ class GameToolGui:
         )
         self._set_var(
             "assist_summary",
-            assist_summary
-            or "当前未接到临时协助任务",
+            assist_summary or "当前未接到临时协助任务",
         )
         self._set_var("schedule_daily_start", control.get("schedule_daily_start", "-"))
         self._set_var("desired_run_state", control.get("desired_run_state", "-"))
-        self._set_var(
-            "auto_restart", bool(control.get("auto_restart_on_stale", False))
-        )
+        self._set_var("auto_restart", bool(control.get("auto_restart_on_stale", False)))
         self._set_var("exe_path", snapshot.get("exe_path"))
 
         self._set_var("local_status", runtime.get("status", "-"))
         self._set_var("local_status_detail", snapshot.get("local_status_detail", "-"))
+        self._set_var("state_warning", state_warning or "-")
         self._set_var("agent_health", agent_health.get("status", "-"))
         self._set_var("agent_health_detail", agent_health.get("detail", "-"))
         self._set_var("session_active", bool(runtime.get("session_active", False)))
@@ -1047,17 +1192,28 @@ class GameToolGui:
         )
         self.raw_text.configure(state=tk.DISABLED)
 
+        if state_warning and state_warning != self.last_state_warning:
+            gui_message = f"[STATE] {state_warning}"
+            self._append_log(gui_message)
+            messagebox.showwarning("STATE 异常", repair_text(state_warning))
+        self.last_state_warning = state_warning
+
     def _build_snapshot(self) -> Dict[str, Any]:
         config = core.load_config()
         tool = core.GameTool(config)
         tool.ensure_dirs()
 
-        state = tool.normalize_state_for_agent(tool.load_state())
+        loaded_state = tool.load_state()
+        state_warning = tool.get_state_agent_mismatch_message(loaded_state)
+        state = tool.normalize_state_for_agent(loaded_state)
+        state_changed = bool(state_warning)
         if tool.normalize_runtime_for_today(state):
-            tool.save_state(state)
+            state_changed = True
         runtime = tool.get_runtime_state(state)
-        tool.ensure_restart_counter(runtime)
-        tool.save_state(state)
+        if tool.ensure_restart_counter(runtime):
+            state_changed = True
+        if state_changed:
+            tool.save_state(state)
 
         control_doc: Dict[str, Any] = {}
         control: Dict[str, Any] = {}
@@ -1140,6 +1296,11 @@ class GameToolGui:
             "agent_id": tool.agent_id,
             "base_url": tool.base_url,
             "exe_path": str(tool.exe_path),
+            "state_file": str(tool.state_file),
+            "bootstrap_file": str(tool.bootstrap_file),
+            "state_warning": state_warning,
+            "bootstrap_check": self._inspect_bootstrap_file(tool),
+            "exe_check": self._inspect_exe_path(tool),
             "task": task,
             "assist": assist,
             "control": control,
@@ -1320,7 +1481,6 @@ class GameToolGui:
                 self._schedule_log(f"已终止 agent 进程 pid={pid}")
         return killed
 
-    
     def _spawn_agent_process(self) -> None:
         cmd = self._build_cli_command("agent")
         subprocess.Popen(
@@ -1455,13 +1615,17 @@ class GameToolGui:
         def action() -> None:
             processes = self._find_agent_processes()
             if processes:
-                self._schedule_log("检测到 agent 正在运行，改为委托 agent 执行“同步并运行一次”")
+                self._schedule_log(
+                    "检测到 agent 正在运行，改为委托 agent 执行“同步并运行一次”"
+                )
             else:
                 self._schedule_log("未检测到 agent，先在后台拉起 agent，再委托执行")
                 self._spawn_agent_process()
                 processes = self._wait_for_agent_processes(timeout_seconds=15)
                 if not processes:
-                    raise RuntimeError("已尝试拉起 agent，但在 15 秒内未检测到 agent 进程")
+                    raise RuntimeError(
+                        "已尝试拉起 agent，但在 15 秒内未检测到 agent 进程"
+                    )
                 self._schedule_log("agent 已启动，继续委托本次同步并运行一次")
             tool = self._create_tool()
             request = tool.enqueue_local_agent_action(

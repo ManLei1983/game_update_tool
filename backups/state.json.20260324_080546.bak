@@ -1,0 +1,12 @@
+{
+  "agent_id": "VM-3-1",
+  "agent_runtime": {
+    "restart_count_date": "2026-03-24",
+    "restart_count_today": 0
+  },
+  "resources": {},
+  "profile_version": "2026-03-12 20:30:31",
+  "config_version": "",
+  "manifest_version": "",
+  "last_sync_time": "2026-03-22 07:34:01"
+}

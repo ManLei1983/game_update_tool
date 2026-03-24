@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -30,6 +31,7 @@ EXAMPLE_CONFIG_FILE = SCRIPT_DIR / "game_tool_config.example.json"
 AGENT_LOG_FILE = SCRIPT_DIR / "runtime" / "agent.log"
 WAIT_PROGRESS_LOG_INTERVAL_SECONDS = 10
 IS_WINDOWS = os.name == "nt"
+JSON_IO_RETRY_DELAYS = (0.0, 0.03, 0.08)
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "server": {
@@ -313,12 +315,60 @@ def parse_hhmm(value: Any) -> Optional[Tuple[int, int]]:
 def load_json_file(path: Path, default: Optional[Any] = None) -> Any:
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+    last_error: Optional[Exception] = None
+    for index, delay in enumerate(JSON_IO_RETRY_DELAYS):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            return json.loads(path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            if not path.exists():
+                return default
+        except (json.JSONDecodeError, OSError) as exc:
+            last_error = exc
+            if index >= len(JSON_IO_RETRY_DELAYS) - 1:
+                raise
+
+    if last_error is not None:
+        raise last_error
+    return default
+
+
+def atomic_write_text_file(path: Path, content: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+            temp_path = Path(handle.name)
+        os.replace(str(temp_path), str(path))
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def save_json_file(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text_file(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -877,15 +927,30 @@ class GameTool:
             return {}
         return state
 
-    def normalize_state_for_agent(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def get_state_agent_mismatch_message(self, state: Dict[str, Any]) -> str:
         saved_agent_id = str(state.get("agent_id", "")).strip()
         if saved_agent_id and saved_agent_id != self.agent_id:
-            print_line(
-                f"[STATE] 检测到 state.json 属于其他 agent，重置运行态: {saved_agent_id} -> {self.agent_id}"
+            return (
+                f"检测到 state.json 属于其他 agent，重置运行态: "
+                f"{saved_agent_id} -> {self.agent_id}"
             )
-            state["agent_runtime"] = {}
-            state["agent_id"] = self.agent_id
-        elif not saved_agent_id:
+        return ""
+
+    def build_empty_state(self) -> Dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "agent_runtime": {},
+        }
+
+    def normalize_state_for_agent(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        mismatch_message = self.get_state_agent_mismatch_message(state)
+        if mismatch_message:
+            backup_path = backup_file(self.state_file, self.backups_dir)
+            if backup_path is not None:
+                print_line(f"[STATE] 已备份旧 state.json -> {backup_path}")
+            print_line(f"[STATE] {mismatch_message}")
+            return self.build_empty_state()
+        elif not str(state.get("agent_id", "")).strip():
             state["agent_id"] = self.agent_id
         return state
 
@@ -1195,11 +1260,12 @@ class GameTool:
     def do_status(self) -> None:
         self.ensure_dirs()
         state = self.normalize_state_for_agent(self.load_state())
-        if self.normalize_runtime_for_today(state):
-            self.save_state(state)
+        state_changed = self.normalize_runtime_for_today(state)
         runtime = self.get_runtime_state(state)
-        self.ensure_restart_counter(runtime)
-        self.save_state(state)
+        if self.ensure_restart_counter(runtime):
+            state_changed = True
+        if state_changed:
+            self.save_state(state)
 
         print_line("=" * 56)
         print_line(f"Agent ID: {self.agent_id}")
@@ -1416,8 +1482,11 @@ class GameTool:
             self.payload_json_file.unlink()
 
         if payload_text:
-            self.payload_text_file.parent.mkdir(parents=True, exist_ok=True)
-            self.payload_text_file.write_text(str(payload_text), encoding="utf-8")
+            atomic_write_text_file(
+                self.payload_text_file,
+                str(payload_text),
+                encoding="utf-8",
+            )
         elif self.payload_text_file.exists():
             self.payload_text_file.unlink()
 
@@ -2051,7 +2120,7 @@ class GameTool:
             f"{key}={value}" for key, value in values.items()
         ]
         updated_text = replace_ini_section(raw_text, LOCAL_REPORT_SECTION, "\n".join(section_lines))
-        ini_path.write_text(updated_text, encoding=encoding)
+        atomic_write_text_file(ini_path, updated_text, encoding=encoding)
         return ini_path
 
     def read_status_ini_progress(self) -> Dict[str, Any]:
@@ -3005,10 +3074,12 @@ class GameTool:
         )
         return True
 
-    def ensure_restart_counter(self, runtime: Dict[str, Any]) -> None:
+    def ensure_restart_counter(self, runtime: Dict[str, Any]) -> bool:
         if runtime.get("restart_count_date", "") != today_str():
             runtime["restart_count_date"] = today_str()
             runtime["restart_count_today"] = 0
+            return True
+        return False
 
     def get_auto_restart_block_reason(
         self, runtime: Dict[str, Any], control: Dict[str, Any]

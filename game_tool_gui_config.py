@@ -135,6 +135,7 @@ class ConfigEditorWindow(tk.Toplevel):
             (4, "path", "Path 检查"),
             (5, "enable", "Enable 检查"),
             (6, "url", "实际上报地址"),
+            (7, "exe", "EXE 检查"),
         ]:
             ttk.Label(compare, text=label).grid(row=row, column=0, sticky="nw", padx=(0, 10), pady=4)
             var = tk.StringVar(value="-")
@@ -185,7 +186,12 @@ class ConfigEditorWindow(tk.Toplevel):
             if self.on_local_config_changed:
                 self.on_local_config_changed()
             self.reload_ini(show_message=False)
-            messagebox.showinfo("保存成功", f"已写入:\n{core.CONFIG_FILE}")
+            exe_check = self._get_exe_check()
+            self.log(f"EXE 检查: {exe_check['text']}")
+            if exe_check["level"] == "ok":
+                messagebox.showinfo("保存成功", f"已写入:\n{core.CONFIG_FILE}\n\n{exe_check['text']}")
+            else:
+                messagebox.showwarning("保存成功，但 EXE 异常", f"已写入:\n{core.CONFIG_FILE}\n\n{exe_check['text']}")
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc))
 
@@ -239,6 +245,30 @@ class ConfigEditorWindow(tk.Toplevel):
         self.compare_vars[key].set(text)
         self.compare_labels[key].configure(fg=STATUS_COLORS.get(level, STATUS_COLORS["muted"]))
 
+    def _get_exe_check(self) -> Dict[str, str]:
+        raw_path = self.exe_path_var.get().strip()
+        if not raw_path:
+            return {
+                "level": "error",
+                "text": "未填写 QianNian EXE 路径",
+            }
+        tool = self._build_tool_from_form()
+        exe_path = tool.exe_path
+        if exe_path.exists() and exe_path.is_file():
+            return {
+                "level": "ok",
+                "text": f"存在: {exe_path}",
+            }
+        if exe_path.exists():
+            return {
+                "level": "error",
+                "text": f"路径存在但不是文件: {exe_path}",
+            }
+        return {
+            "level": "error",
+            "text": f"不存在: {exe_path}",
+        }
+
     def _refresh_compare(self) -> None:
         parsed = parse_base_url(self.base_url_var.get())
         host = self.ini_host_var.get().strip()
@@ -266,7 +296,10 @@ class ConfigEditorWindow(tk.Toplevel):
         report_url = f"http://{host}:{port}{path_value}" if host and port and path_ok else "-"
         self._set_compare("url", report_url, "muted" if report_url == "-" else "ok")
 
-        if all([host_match, port_match, agent_match, path_ok, enable]):
+        exe_check = self._get_exe_check()
+        self._set_compare("exe", exe_check["text"], exe_check["level"])
+
+        if all([host_match, port_match, agent_match, path_ok, enable, exe_check["level"] == "ok"]):
             self._set_compare("summary", "一致性通过。game_tool 与 QianNian LocalReport 配置匹配。", "ok")
         else:
             missing = []
@@ -280,4 +313,6 @@ class ConfigEditorWindow(tk.Toplevel):
                 missing.append("Path")
             if not enable:
                 missing.append("Enable")
+            if exe_check["level"] != "ok":
+                missing.append("EXE")
             self._set_compare("summary", "存在不一致项: " + ", ".join(missing), "error")
