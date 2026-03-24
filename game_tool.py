@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -397,6 +398,63 @@ def backup_file(path: Path, backups_dir: Path) -> Optional[Path]:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_path)
     return backup_path
+
+
+def backup_path(path: Path, backups_dir: Path) -> Optional[Path]:
+    if not path.exists():
+        return None
+    if path.is_file():
+        return backup_file(path, backups_dir)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_target = backups_dir / f"{path.name}.{timestamp}.bak"
+    backup_target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(path), str(backup_target))
+    return backup_target
+
+
+def normalize_line_endings(text: str, newline: str) -> str:
+    normalized = text.replace("\r\n", "\n")
+    return normalized.replace("\n", newline)
+
+
+def detect_line_ending(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def is_http_url(value: str) -> bool:
+    lowered = str(value or "").strip().lower()
+    return lowered.startswith(("http://", "https://"))
+
+
+def is_file_url(value: str) -> bool:
+    return str(value or "").strip().lower().startswith("file://")
+
+
+def is_windows_absolute_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", str(value or "").strip()))
+
+
+def is_unc_path(value: str) -> bool:
+    return str(value or "").strip().startswith("\\\\")
+
+
+def source_path_from_url(value: str) -> Path:
+    raw_value = str(value or "").strip()
+    if is_file_url(raw_value):
+        parsed = urllib.parse.urlsplit(raw_value)
+        raw_path = urllib.request.url2pathname(parsed.path or "")
+        if parsed.netloc:
+            relative_path = raw_path.lstrip("/\\").replace("/", "\\")
+            return Path(f"\\\\{parsed.netloc}\\{relative_path}")
+        return Path(raw_path)
+    return Path(raw_value)
+
+
+def infer_source_file_name(value: str) -> str:
+    raw_value = str(value or "").strip()
+    if is_http_url(raw_value):
+        return Path(urllib.parse.urlsplit(raw_value).path).name or "download.bin"
+    return source_path_from_url(raw_value).name or "download.bin"
 
 
 class Win32DialogController:
@@ -1491,20 +1549,26 @@ class GameTool:
             self.payload_text_file.unlink()
 
     def download_to_temp(self, url: str) -> Path:
-        file_name = Path(urllib.parse.urlsplit(url).path).name or "download.bin"
+        file_name = infer_source_file_name(url)
         temp_path = self.downloads_dir / f".{int(time.time())}_{file_name}.tmp"
         temp_path.parent.mkdir(parents=True, exist_ok=True)
 
-        request = urllib.request.Request(url, method="GET")
-        if self.auth_token and not self.use_query_token:
-            request.add_header("X-Auth-Token", self.auth_token)
-
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout_seconds
-            ) as response:
-                with temp_path.open("wb") as handle:
-                    shutil.copyfileobj(response, handle)
+            if is_http_url(url):
+                request = urllib.request.Request(url, method="GET")
+                if self.auth_token and not self.use_query_token:
+                    request.add_header("X-Auth-Token", self.auth_token)
+
+                with urllib.request.urlopen(
+                    request, timeout=self.timeout_seconds
+                ) as response:
+                    with temp_path.open("wb") as handle:
+                        shutil.copyfileobj(response, handle)
+            else:
+                source_path = source_path_from_url(url)
+                if not source_path.exists():
+                    raise FileNotFoundError(source_path)
+                shutil.copy2(source_path, temp_path)
         except Exception as exc:
             if temp_path.exists():
                 temp_path.unlink()
@@ -1521,6 +1585,202 @@ class GameTool:
             raise RuntimeError(
                 f"SHA256 校验失败: {file_path.name} expected={expected_sha256} actual={actual_sha256}"
             )
+
+    def resolve_resource_target_path(self, raw_target_path: str) -> Path:
+        target_text = str(raw_target_path or "").strip()
+        if not target_text:
+            return self.resolve_path("")
+        if "@exe_dir@" in target_text:
+            target_text = target_text.replace("@exe_dir@", str(self.exe_path.parent))
+        return self.resolve_path(target_text)
+
+    def persist_runtime_config(self) -> None:
+        save_json_file(CONFIG_FILE, self.config)
+
+    def update_local_exe_path(self, new_exe_path: Path) -> None:
+        self.config.setdefault("paths", {})["exe_path"] = str(new_exe_path)
+        self.paths["exe_path"] = str(new_exe_path)
+        self.exe_path = new_exe_path
+        self.persist_runtime_config()
+
+    def record_resource_state(
+        self,
+        resource_state: Dict[str, Any],
+        name: str,
+        version: str,
+        target_path: Path,
+        kind: str,
+    ) -> None:
+        resource_state[name] = {
+            "version": version,
+            "target_path": str(target_path),
+            "kind": kind,
+            "updated_at": now_str(),
+        }
+
+    def resolve_zip_bundle_root(self, staging_dir: Path) -> Path:
+        children = [item for item in staging_dir.iterdir() if item.name != "__MACOSX"]
+        if len(children) == 1 and children[0].is_dir():
+            return children[0]
+        return staging_dir
+
+    def apply_zip_bundle_resource(
+        self,
+        item: Dict[str, Any],
+        target_path: Path,
+        temp_file: Path,
+        resource_state: Dict[str, Any],
+    ) -> None:
+        name = str(item.get("name", "")).strip() or "unnamed"
+        version = str(item.get("version", "")).strip()
+        staging_dir = self.downloads_dir / f".{int(time.time())}_{name}_extract"
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(temp_file) as archive:
+                archive.extractall(staging_dir)
+            extracted_root = self.resolve_zip_bundle_root(staging_dir)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            backup = backup_path(target_path, self.backups_dir)
+            shutil.move(str(extracted_root), str(target_path))
+            self.record_resource_state(resource_state, name, version, target_path, "zip_bundle")
+            if backup:
+                print_line(f"[SYNC] 已备份旧目录 -> {backup}")
+            print_line(f"[SYNC] 目录资源已更新 -> {target_path}")
+        finally:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def update_ini_value(
+        self,
+        target_path: Path,
+        section_name: str,
+        key_name: str,
+        value_text: str,
+    ) -> None:
+        raw_text = ""
+        encoding = "utf-8-sig"
+        newline = "\r\n"
+        if target_path.exists():
+            raw_text, encoding = read_text_with_fallback(target_path)
+            newline = detect_line_ending(raw_text)
+            backup_file(target_path, self.backups_dir)
+
+        lines = raw_text.replace("\r\n", "\n").split("\n") if raw_text else []
+        target_line = f"{key_name}={value_text}"
+        section_header = f"[{section_name}]"
+        section_start = -1
+        section_end = len(lines)
+        key_found = False
+
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped == section_header:
+                section_start = index
+                section_end = len(lines)
+                for inner_index in range(index + 1, len(lines)):
+                    inner_line = lines[inner_index].strip()
+                    if inner_line.startswith("[") and inner_line.endswith("]"):
+                        section_end = inner_index
+                        break
+                break
+
+        if section_start >= 0:
+            for inner_index in range(section_start + 1, section_end):
+                line = lines[inner_index]
+                stripped = line.strip()
+                if not stripped or stripped.startswith(("#", ";")) or "=" not in line:
+                    continue
+                left = line.split("=", 1)[0].strip()
+                if left == key_name:
+                    lines[inner_index] = target_line
+                    key_found = True
+                    break
+            if not key_found:
+                lines.insert(section_end, target_line)
+        else:
+            if lines and any(part.strip() for part in lines):
+                lines.extend(["", section_header, target_line])
+            else:
+                lines = [section_header, target_line]
+
+        updated_text = normalize_line_endings("\n".join(lines).rstrip("\n") + "\n", newline)
+        atomic_write_text_file(target_path, updated_text, encoding=encoding)
+
+    def apply_ini_value_resource(
+        self,
+        item: Dict[str, Any],
+        target_path: Path,
+        resource_state: Dict[str, Any],
+    ) -> None:
+        name = str(item.get("name", "")).strip() or "unnamed"
+        version = str(item.get("version", "")).strip()
+        section_name = str(item.get("ini_section", "")).strip()
+        key_name = str(item.get("ini_key", "")).strip()
+        value_text = str(item.get("ini_value", ""))
+        if not section_name or not key_name:
+            raise RuntimeError(f"ini_value 缺少 section/key: {name}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        self.update_ini_value(target_path, section_name, key_name, value_text)
+        self.record_resource_state(resource_state, name, version, target_path, "ini_value")
+        print_line(f"[SYNC] INI 配置已更新 -> {target_path} [{section_name}] {key_name}")
+
+    def update_text_kv_line(
+        self,
+        target_path: Path,
+        match_key: str,
+        line_text: str,
+        append_comment: str,
+    ) -> None:
+        raw_text = ""
+        encoding = "utf-8-sig"
+        newline = "\r\n"
+        if target_path.exists():
+            raw_text, encoding = read_text_with_fallback(target_path)
+            newline = detect_line_ending(raw_text)
+            backup_file(target_path, self.backups_dir)
+
+        lines = raw_text.replace("\r\n", "\n").split("\n") if raw_text else []
+        replaced = False
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in line:
+                continue
+            left = line.split("=", 1)[0].strip()
+            if left == match_key:
+                lines[index] = line_text
+                replaced = True
+                break
+
+        if not replaced:
+            if lines and any(part.strip() for part in lines):
+                if lines[-1].strip():
+                    lines.append("")
+            comment_text = str(append_comment or "").strip() or f"{today_str()} 更新"
+            lines.append(f"# {comment_text}")
+            lines.append(line_text)
+
+        updated_text = normalize_line_endings("\n".join(lines).rstrip("\n") + "\n", newline)
+        atomic_write_text_file(target_path, updated_text, encoding=encoding)
+
+    def apply_text_kv_line_resource(
+        self,
+        item: Dict[str, Any],
+        target_path: Path,
+        resource_state: Dict[str, Any],
+    ) -> None:
+        name = str(item.get("name", "")).strip() or "unnamed"
+        version = str(item.get("version", "")).strip()
+        match_key = str(item.get("text_key", "")).strip()
+        line_text = str(item.get("text_line", "")).strip()
+        append_comment = str(item.get("append_comment", "")).strip()
+        if not match_key or not line_text:
+            raise RuntimeError(f"text_kv_line 缺少 text_key/text_line: {name}")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        self.update_text_kv_line(target_path, match_key, line_text, append_comment)
+        self.record_resource_state(resource_state, name, version, target_path, "text_kv_line")
+        print_line(f"[SYNC] 文本键值已更新 -> {target_path} key={match_key}")
 
     def sync_resource_items(
         self, manifest: Dict[str, Any], state: Dict[str, Any]
@@ -1539,33 +1799,44 @@ class GameTool:
                 continue
 
             name = str(item.get("name", "")).strip() or "unnamed"
+            kind = str(item.get("kind", "")).strip().lower() or "config"
             url = str(item.get("url", "")).strip()
             target_path_text = str(item.get("target_path", "")).strip()
             version = str(item.get("version", "")).strip()
             sha256 = str(item.get("sha256", "")).strip()
 
-            if not url or not target_path_text:
-                print_line(f"[SYNC] 跳过资源 {name}，因为 url 或 target_path 为空")
+            if not target_path_text:
+                print_line(f"[SYNC] 跳过资源 {name}，因为 target_path 为空")
                 continue
 
-            target_path = self.resolve_path(target_path_text)
+            target_path = self.resolve_resource_target_path(target_path_text)
             old_version = str(resource_state.get(name, {}).get("version", ""))
             if target_path.exists() and version and old_version == version:
                 print_line(f"[SYNC] 资源未变化，跳过: {name} ({version})")
+                continue
+
+            if kind == "ini_value":
+                self.apply_ini_value_resource(item, target_path, resource_state)
+                continue
+            if kind == "text_kv_line":
+                self.apply_text_kv_line_resource(item, target_path, resource_state)
+                continue
+            if not url:
+                print_line(f"[SYNC] 跳过资源 {name}，因为 url 为空")
                 continue
 
             print_line(f"[SYNC] 下载资源: {name}")
             temp_file = self.download_to_temp(url)
             try:
                 self.verify_sha256(temp_file, sha256)
+                if kind == "zip_bundle":
+                    self.apply_zip_bundle_resource(item, target_path, temp_file, resource_state)
+                    continue
+
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 backup = backup_file(target_path, self.backups_dir)
                 shutil.move(str(temp_file), str(target_path))
-                resource_state[name] = {
-                    "version": version,
-                    "target_path": str(target_path),
-                    "updated_at": now_str(),
-                }
+                self.record_resource_state(resource_state, name, version, target_path, kind)
                 if backup:
                     print_line(f"[SYNC] 已备份旧文件 -> {backup}")
                 print_line(f"[SYNC] 资源已更新 -> {target_path}")
@@ -1595,7 +1866,14 @@ class GameTool:
         temp_file = self.download_to_temp(exe_url)
         try:
             self.verify_sha256(temp_file, exe_sha256)
-            if temp_file.suffix.lower() != ".exe":
+            launch_info = bootstrap.get("launch", {}) if isinstance(bootstrap.get("launch", {}), dict) else {}
+            requested_name = str(launch_info.get("startup_exe", "")).strip() or infer_source_file_name(exe_url)
+            target_exe_path = (
+                Path(requested_name)
+                if Path(requested_name).is_absolute()
+                else self.exe_path.parent / requested_name
+            )
+            if target_exe_path.suffix.lower() != ".exe":
                 staged_path = self.downloads_dir / temp_file.name.replace(".tmp", "")
                 shutil.move(str(temp_file), str(staged_path))
                 print_line(
@@ -1603,13 +1881,16 @@ class GameTool:
                 )
                 return
 
-            self.exe_path.parent.mkdir(parents=True, exist_ok=True)
-            backup = backup_file(self.exe_path, self.backups_dir)
-            shutil.move(str(temp_file), str(self.exe_path))
+            target_exe_path.parent.mkdir(parents=True, exist_ok=True)
+            backup = backup_file(target_exe_path, self.backups_dir)
+            shutil.move(str(temp_file), str(target_exe_path))
             state["exe_version"] = exe_version
+            if target_exe_path != self.exe_path:
+                print_line(f"[SYNC] 已切换本地 EXE 路径 -> {target_exe_path}")
+            self.update_local_exe_path(target_exe_path)
             if backup:
                 print_line(f"[SYNC] 已备份旧 EXE -> {backup}")
-            print_line(f"[SYNC] EXE 已更新 -> {self.exe_path}")
+            print_line(f"[SYNC] EXE 已更新 -> {target_exe_path}")
         finally:
             if temp_file.exists():
                 temp_file.unlink()
@@ -1696,7 +1977,11 @@ class GameTool:
 
         exe_path = self.exe_path
         if startup_exe:
-            requested_path = self.resolve_path(startup_exe)
+            requested_raw = Path(startup_exe)
+            if requested_raw.is_absolute():
+                requested_path = requested_raw
+            else:
+                requested_path = self.exe_path.parent / requested_raw
             if requested_path.exists():
                 exe_path = requested_path
             elif self.exe_path.exists():
@@ -2889,6 +3174,9 @@ class GameTool:
             f"start_session:{reason}:prepare_bootstrap",
             f"[STEP] start_session begin: reason={reason} use_sync={use_sync} count_as_restart={count_as_restart}",
         )
+        if use_sync and self.is_process_running():
+            print_line(f"[SYNC] 检测到 qiannian 正在运行，先停止再执行同步: reason={reason}")
+            self.stop_qiannian(state, reason=f"pre-sync:{reason}", clear_session=False)
         cached_bootstrap = self.prepare_bootstrap(use_sync=use_sync)
         bootstrap = self.build_effective_bootstrap(
             cached_bootstrap,
@@ -3735,6 +4023,12 @@ class GameTool:
 
                 if self.should_run_daily_schedule(runtime, control):
                     self.touch_agent_loop(state, phase="daily_schedule")
+                    try:
+                        self.do_sync()
+                    except Exception as exc:
+                        print_line(
+                            f"[AGENT] 每日首次启动前同步失败，继续使用本地版本: {exc}"
+                        )
                     started = self.start_session(
                         state,
                         reason="daily_schedule",
